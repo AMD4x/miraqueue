@@ -9,7 +9,7 @@ MiraQueue V1.0.0 is the first public release.
 - Preview and apply commands for queued changes.
 - Full Mirror workflow with strict, update-keep-extras, and missing-only policies.
 - Scheduled watcher support using Windows Task Scheduler.
-- English documentation, maps, simulated GIF demos, and CI checks.
+- English documentation, maps, and simulated GIF demos.
 
 ## Known Boundaries
 

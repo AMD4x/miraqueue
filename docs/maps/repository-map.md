@@ -6,12 +6,12 @@ graph TD
   A --> C[Start_MiraQueue.cmd]
   A --> D[docs]
   A --> E[examples]
-  A --> F[tests]
-  A --> G[tools]
-  A --> H[.github]
+  A --> F[LICENSE]
+  A --> G[CHANGELOG.md]
+  A --> H[SECURITY.md]
   D --> I[maps]
   D --> J[explanation]
   D --> K[media]
 ```
 
-The public repo contains the script, launcher, docs, examples, tests, tools, and CI.
+The public repo contains the end-user script, launcher, documentation, example configuration, license, release history, and security guidance.

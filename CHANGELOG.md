@@ -11,4 +11,4 @@ Initial public release of MiraQueue.
 - Preview Pending and Apply Pending workflows.
 - Full Mirror workflow with `STRICT`, `UPDATE_KEEP_EXTRAS`, and `MISSING_ONLY` policies.
 - Scheduled watcher task installation, restart, removal, and uninstall flows.
-- English documentation, maps, simulated GIF demos, tests, and GitHub Actions CI.
+- English documentation, maps, and simulated GIF demos.
