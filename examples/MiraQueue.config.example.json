@@ -1,0 +1,57 @@
+{
+  "Version": "V1.0.0",
+  "TaskName": "MiraQueue",
+  "DataDir": "%LOCALAPPDATA%\\MiraQueue",
+  "QueueFile": "MiraQueue.queue.ndjson",
+  "LogFile": "MiraQueue.log",
+  "DebounceMs": 5000,
+  "WatchBufferKB": 1024,
+  "LogRetentionDays": 30,
+  "PreserveModifiedTime": true,
+  "CopyAttributes": false,
+  "CopyTempThenReplace": true,
+  "DeleteDestOnSourceDelete": true,
+  "TimeToleranceSeconds": 2,
+  "DirectoryScanMaxItems": 500000,
+  "RobocopyThreads": 8,
+  "RobocopyRetries": 1,
+  "RobocopyWaitSeconds": 1,
+  "RobocopyParallelBatches": 3,
+  "TempCleanupMinAgeMinutes": 10,
+  "DriveMaps": {
+    "D:": "D:\\DemoBackup"
+  },
+  "Pairs": [
+    {
+      "Name": "DemoProject",
+      "Source": "C:\\Demo\\Source",
+      "Dest": "D:\\DemoBackup\\Source"
+    }
+  ],
+  "GlobalExcludeDirs": [
+    "System Volume Information",
+    "$Recycle.Bin",
+    "RECYCLER",
+    "Recovery"
+  ],
+  "GlobalExcludeFiles": [
+    "Thumbs.db",
+    "desktop.ini",
+    "*.tmp",
+    "*.crdownload",
+    "*.part",
+    "*.download",
+    "*.mbtmp-*"
+  ],
+  "PairExcludeDirs": {
+    "DemoProject": [
+      "node_modules",
+      ".git"
+    ]
+  },
+  "PairExcludeFiles": {
+    "DemoProject": [
+      "*.cache"
+    ]
+  }
+}

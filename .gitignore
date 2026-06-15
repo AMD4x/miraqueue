@@ -1,0 +1,29 @@
+# Runtime files
+MiraQueue.config.json
+MiraQueue.queue.ndjson
+MiraQueue.log
+MiraQueue.log.*.old
+MiraQueue.apply.lock
+MiraQueue.clear-queue
+MiraQueue.watch.hidden.vbs
+MiraQueue.scriptdir.txt
+*.old
+*.log
+*.lock
+*.tmp
+*.crdownload
+*.part
+*.download
+*.mbtmp-*
+
+# Local editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Private publishing helper must stay outside the public repo
+publish-helper-private/
