@@ -24,6 +24,3 @@ MiraQueue.scriptdir.txt
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Private publishing helper must stay outside the public repo
-publish-helper-private/
