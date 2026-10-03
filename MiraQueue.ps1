@@ -1,7 +1,8 @@
 ﻿param(
     [ValidateSet("Menu","Watch","PreviewPending","ApplyPending","FullMirror","Status","Install","RemoveTask","Uninstall")]
     [string]$Mode = "Menu",
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$TracePendingPerformance
 )
 
 try {
@@ -9,9 +10,10 @@ try {
     $OutputEncoding = [System.Text.Encoding]::UTF8
 } catch {}
 
-$ErrorActionPreference = "Continue"
-$script:AppName = "MiraQueue Backup"
-$script:DeveloperLine = "V1.0.0 - Developed by Ahmed Mustafa"
+$ErrorActionPreference = "Stop"
+$script:AppName = "MiraQueue 🪞"
+$script:ProductVersion = "V2.0.0"
+$script:DeveloperLine = "V2.0.0 - Developed by Ahmed Mustafa"
 $script:ScriptPath = $PSCommandPath
 if ([string]::IsNullOrWhiteSpace($script:ScriptPath)) { $script:ScriptPath = $MyInvocation.MyCommand.Path }
 if ([string]::IsNullOrWhiteSpace($script:ScriptPath)) { $script:ScriptPath = Join-Path (Get-Location).Path "MiraQueue.ps1" }
@@ -22,13 +24,23 @@ $script:ConfigPath = Join-Path $script:ScriptDir "MiraQueue.config.json"
 $script:Config = $null
 $script:DataDir = $null
 $script:QueuePath = $null
+$script:QueueMetaPath = $null
+$script:QueueMutexName = $null
 $script:LogPath = $null
 $script:ApplyLockPath = $null
 $script:ClearQueueRequestPath = $null
 $script:HiddenWatchLauncherPath = $null
 $script:ScriptDirPointerFile = $null
+$script:StopWatcherRequestPath = $null
 $script:Pending = @{}
+$script:PendingSessionSnapshot = $null
+$script:TracePendingPerformance = [bool]$TracePendingPerformance
+$script:PendingPerformance = $null
+$script:LastPendingPerformance = $null
+$script:PendingScanActive = $false
+$script:DriveStatusCache = @{}
 $script:Mutex = $null
+$script:ApplyLockStream = $null
 $script:SuppressPause = [bool]$NoPause
 
 function Expand-TextPath {
@@ -39,7 +51,7 @@ function Expand-TextPath {
 
 function New-DefaultConfig {
     [ordered]@{
-        Version = "V1.0.0"
+        Version = "V2.0.0"
         TaskName = "MiraQueue"
         DataDir = "%LOCALAPPDATA%\MiraQueue"
         QueueFile = "MiraQueue.queue.ndjson"
@@ -57,7 +69,7 @@ function New-DefaultConfig {
         RobocopyRetries = 1
         RobocopyWaitSeconds = 1
         RobocopyParallelBatches = 3
-        TempCleanupMinAgeMinutes = 10
+        ParallelFileTransfers = 4
         DriveMaps = [ordered]@{}
         Pairs = @()
         GlobalExcludeDirs = @(
@@ -73,29 +85,36 @@ function New-DefaultConfig {
             "*.crdownload",
             "*.part",
             "*.download",
-            "*.mbtmp-*"
+            "*.mqtmp-*",
+            "*.mqbackup-*"
         )
         PairExcludeDirs = [ordered]@{}
         PairExcludeFiles = [ordered]@{}
     }
 }
 
-function Save-Config {
+function Write-AtomicText {
+    param([string]$Path, [string]$Text)
+    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     try {
-        Ensure-AllPairExclusionKeys
-        $json = $script:Config | ConvertTo-Json -Depth 50
-        Set-Content -LiteralPath $script:ConfigPath -Value $json -Encoding UTF8
-        Write-Log "INFO" "Configuration saved"
-        Refresh-WatcherAfterConfigChange
-    } catch {
-        Write-Color "Failed to save configuration: $($_.Exception.Message)" "Red"
-    }
+        [IO.File]::WriteAllText($temporary,$Text,[Text.UTF8Encoding]::new($true))
+        if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary,$Path,[System.Management.Automation.Language.NullString]::Value) }
+        else { [IO.File]::Move($temporary,$Path) }
+    } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
+}
+
+function Save-Config {
+    Ensure-ConfigShape
+    Write-AtomicText $script:ConfigPath ($script:Config | ConvertTo-Json -Depth 50)
+    $script:PendingSessionSnapshot = $null
+    Write-Log 'INFO' 'Configuration saved'
+    Refresh-WatcherAfterConfigChange
 }
 
 function Refresh-WatcherAfterConfigChange {
     try {
         $taskName = [string]$script:Config.TaskName
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        $task = Get-OwnedScheduledTask -TaskName $taskName
         $watchers = @(Get-WatcherProcesses)
         if ($null -eq $task -and $watchers.Count -eq 0) { return }
 
@@ -128,11 +147,11 @@ function Wait-ScheduledTaskNotRunning {
     )
     $task = $null
     for ($i = 0; $i -lt $Attempts; $i++) {
-        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $task = Get-OwnedScheduledTask -TaskName $TaskName
         if ($null -eq $task -or $task.State -ne "Running") { return $task }
         Start-Sleep -Milliseconds $DelayMs
     }
-    return (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+    return (Get-OwnedScheduledTask -TaskName $TaskName)
 }
 
 function Wait-ScheduledWatcherStarted {
@@ -143,19 +162,21 @@ function Wait-ScheduledWatcherStarted {
     )
     $task = $null
     for ($i = 0; $i -lt $Attempts; $i++) {
-        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $task = Get-OwnedScheduledTask -TaskName $TaskName
         $watchers = @(Get-WatcherProcesses)
         if (($null -ne $task -and $task.State -eq "Running") -or $watchers.Count -gt 0) { return $task }
         Start-Sleep -Milliseconds $DelayMs
     }
-    return (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+    return (Get-OwnedScheduledTask -TaskName $TaskName)
 }
 
 function Initialize-App {
+    param([switch]$ReadOnly)
     if (!(Test-Path -LiteralPath $script:ConfigPath)) {
-        $script:Config = New-DefaultConfig
+        if ($ReadOnly) { throw "Configuration missing; start the menu once to configure MiraQueue" }
+        $script:Config = [pscustomobject](New-DefaultConfig)
         $json = $script:Config | ConvertTo-Json -Depth 50
-        Set-Content -LiteralPath $script:ConfigPath -Value $json -Encoding UTF8
+        Write-AtomicText $script:ConfigPath $json
     } else {
         try {
             $script:Config = Get-Content -LiteralPath $script:ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -170,28 +191,44 @@ function Initialize-App {
     if ([string]::IsNullOrWhiteSpace($script:DataDir)) {
         $script:DataDir = Join-Path $env:LOCALAPPDATA "MiraQueue"
     }
-    New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
+    $script:DataDir=[IO.Path]::GetFullPath($script:DataDir)
+    if ($script:DataDir.TrimEnd('\') -ieq [IO.Path]::GetPathRoot($script:DataDir).TrimEnd('\')) { throw 'DataDir cannot be a filesystem root' }
+    if (Test-RuntimePathProtected $script:DataDir) { throw 'DataDir must be outside configured source and destination trees' }
+    Assert-NoReparsePath $script:DataDir
+    if (-not $ReadOnly) { [IO.Directory]::CreateDirectory($script:DataDir) | Out-Null }
     $script:QueuePath = Join-Path $script:DataDir ([string]$script:Config.QueueFile)
+    $script:QueueMetaPath = Join-Path $script:DataDir "MiraQueue.queue.meta.json"
+    $mutexHash = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $mutexBytes = [System.Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($script:QueuePath).ToUpperInvariant())
+        $mutexId = ([System.BitConverter]::ToString($mutexHash.ComputeHash($mutexBytes))).Replace("-", "").Substring(0, 24)
+    } finally {
+        $mutexHash.Dispose()
+    }
+    $script:QueueMutexName = "Global\MiraQueueQueue_" + $mutexId
     $script:LogPath = Join-Path $script:DataDir ([string]$script:Config.LogFile)
     $script:ApplyLockPath = Join-Path $script:DataDir "MiraQueue.apply.lock"
     $script:ClearQueueRequestPath = Join-Path $script:DataDir "MiraQueue.clear-queue"
     $script:HiddenWatchLauncherPath = Join-Path $script:DataDir "MiraQueue.watch.hidden.vbs"
     $script:ScriptDirPointerFile = Join-Path $script:DataDir "MiraQueue.scriptdir.txt"
+    $script:StopWatcherRequestPath = Join-Path $script:DataDir "MiraQueue.stop-watch"
+    if ($ReadOnly) { return }
+    Assert-NoReparsePath $script:DataDir
+    [IO.File]::WriteAllText($script:ScriptDirPointerFile, $script:ScriptDir, [Text.Encoding]::Unicode)
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) { throw 'Queue initialization lock unavailable' }
     try {
-        $existing = Get-Content -LiteralPath $script:ScriptDirPointerFile -Raw -Encoding ASCII -ErrorAction SilentlyContinue
-        if (([string]::IsNullOrWhiteSpace($existing)) -or $existing.Trim() -ne $script:ScriptDir) {
-            Set-Content -LiteralPath $script:ScriptDirPointerFile -Value $script:ScriptDir -Encoding ASCII
+        if (-not [IO.File]::Exists($script:QueuePath)) {
+            $stream = [IO.File]::Open($script:QueuePath,[IO.FileMode]::CreateNew); $stream.Dispose()
         }
-    } catch {
-        Set-Content -LiteralPath $script:ScriptDirPointerFile -Value $script:ScriptDir -Encoding ASCII
-    }
-    if (!(Test-Path -LiteralPath $script:QueuePath)) {
-        New-Item -ItemType File -Path $script:QueuePath -Force | Out-Null
-    }
+    } finally { Exit-QueueMutex $mutex }
+    Initialize-QueueStorage
     Rotate-LogIfNeeded
 }
 
 function Ensure-ConfigShape {
+    if ($script:Config -is [Collections.IDictionary]) { $script:Config = [pscustomobject]$script:Config }
+    if ($null -eq $script:Config -or $script:Config -isnot [pscustomobject]) { throw 'Config must be a JSON object' }
     $defaults = New-DefaultConfig
     foreach ($prop in $defaults.Keys) {
         if ($null -eq $script:Config.PSObject.Properties[$prop]) {
@@ -200,8 +237,29 @@ function Ensure-ConfigShape {
     }
     if ($null -eq $script:Config.Pairs) { $script:Config.Pairs = @() }
     if ($null -eq $script:Config.DriveMaps) { $script:Config.DriveMaps = [pscustomobject]@{} }
+    if ($script:Config.PairExcludeDirs -is [Collections.IDictionary]) { $script:Config.PairExcludeDirs=[pscustomobject]$script:Config.PairExcludeDirs }
+    if ($script:Config.PairExcludeFiles -is [Collections.IDictionary]) { $script:Config.PairExcludeFiles=[pscustomobject]$script:Config.PairExcludeFiles }
+    if ($script:Config.DriveMaps -is [Collections.IDictionary]) { $script:Config.DriveMaps=[pscustomobject]$script:Config.DriveMaps }
     if ($null -eq $script:Config.PairExcludeDirs) { $script:Config.PairExcludeDirs = [pscustomobject]@{} }
     if ($null -eq $script:Config.PairExcludeFiles) { $script:Config.PairExcludeFiles = [pscustomobject]@{} }
+    $parallelFiles = 0
+    if (-not [int]::TryParse([string]$script:Config.ParallelFileTransfers, [ref]$parallelFiles) -or $parallelFiles -lt 1 -or $parallelFiles -gt 32) {
+        $script:Config.ParallelFileTransfers = 4
+    }
+    $names=@{}
+    foreach ($pair in @(Get-Pairs)) {
+        if ([string]::IsNullOrWhiteSpace([string]$pair.Name) -or [string]$pair.Name -match '[|\x00-\x1f]' -or $names.ContainsKey([string]$pair.Name)) { throw 'Pair names must be nonempty and unique (case-insensitive)' }
+        $names[[string]$pair.Name]=$true
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$script:Config.TaskName) -or [string]$script:Config.TaskName -match '[\\/*?"<>|]') { throw 'TaskName must be a plain task name' }
+    if ([string]$script:Config.QueueFile -ieq [string]$script:Config.LogFile) { throw 'QueueFile and LogFile must be distinct' }
+    $script:Config.Version = $script:ProductVersion
+    foreach ($name in @('QueueFile','LogFile')) {
+        $value = [string]$script:Config.$name
+        $null = Normalize-QueueRelPath $value
+        if ($value -in @("MiraQueue.queue.meta.json","MiraQueue.apply.lock","MiraQueue.clear-queue","MiraQueue.stop-watch","MiraQueue.watch.hidden.vbs","MiraQueue.scriptdir.txt")) { throw "Runtime filename is reserved: $value" }
+        if ([string]::IsNullOrWhiteSpace($value) -or [IO.Path]::GetFileName($value) -cne $value -or $value -match '[:*?"<>|]') { throw "$name must be a filename inside DataDir" }
+    }
     Ensure-AllPairExclusionKeys
 }
 
@@ -274,24 +332,20 @@ function Write-Log {
 function Rotate-LogIfNeeded {
     try {
         if ([string]::IsNullOrWhiteSpace($script:LogPath)) { return }
-        $days = [int]$script:Config.LogRetentionDays
-        if ($days -gt 0 -and (Test-Path -LiteralPath $script:DataDir)) {
-            Get-ChildItem -LiteralPath $script:DataDir -Filter "*.old" -ErrorAction SilentlyContinue |
-                Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$days) } |
-                Remove-Item -Force -ErrorAction SilentlyContinue
-        }
-        if (Test-Path -LiteralPath $script:LogPath) {
-            $fi = Get-Item -LiteralPath $script:LogPath -ErrorAction SilentlyContinue
-            if ($fi -and $fi.Length -gt 4194304) {
-                $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-                Move-Item -LiteralPath $script:LogPath -Destination "$script:LogPath.$stamp.old" -Force
+        $name = [regex]::Escape([IO.Path]::GetFileName($script:LogPath))
+        foreach ($item in @(Get-ChildItem -LiteralPath $script:DataDir -File -Force -ErrorAction Stop)) {
+            if ($item.Name -match ('^'+$name+'\.\d{8}-\d{6}\.old$') -and [int]$script:Config.LogRetentionDays -gt 0 -and $item.LastWriteTime -lt (Get-Date).AddDays(-[int]$script:Config.LogRetentionDays)) {
+                Remove-OwnedPath $script:DataDir $item.FullName
             }
         }
-    } catch {}
+        if ([IO.File]::Exists($script:LogPath) -and ([IO.FileInfo]::new($script:LogPath)).Length -gt 4194304) {
+            [IO.File]::Move($script:LogPath, ($script:LogPath+'.'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.old'))
+        }
+    } catch { } # Logging must never replace the operation's error.
 }
 
 function Clear-Screen {
-    Clear-Host
+    try { Clear-Host -ErrorAction Stop } catch {}
 }
 
 function Center-Text {
@@ -359,7 +413,7 @@ function Format-ByteSize {
     if ($Bytes -eq $null) { return "--" }
     $value = [double]$Bytes
     if ($value -lt 0) { $value = 0 }
-    $units = @("B", "KB", "MB", "GB", "TB")
+    $units = @("B", "KiB", "MiB", "GiB", "TiB")
     $idx = 0
     while ($value -ge 1024 -and $idx -lt ($units.Count - 1)) {
         $value = $value / 1024
@@ -398,9 +452,9 @@ function Format-ApplyProgressBar {
 
 function Get-ApplyProgressLayout {
     $width = [math]::Max(80, (Get-ConsoleWidthSafe) - 1)
-    $cols = [ordered]@{ No=3; Status=7; Pair=12; Item=16; Progress=23; Size=17; Speed=10; Eta=7 }
+    $cols = [ordered]@{ No=3; Status=7; Pair=12; Item=16; Progress=23; Size=23; Speed=10; Eta=7 }
     if ($width -ge 146) {
-        $cols = [ordered]@{ No=3; Status=8; Pair=16; Item=30; Progress=30; Size=17; Speed=10; Eta=7 }
+        $cols = [ordered]@{ No=3; Status=8; Pair=16; Item=30; Progress=30; Size=23; Speed=10; Eta=7 }
     } elseif ($width -lt 112) {
         $cols.Pair = 10
         $cols.Progress = 20
@@ -451,13 +505,19 @@ function Get-ApplyProgressLayout {
         $cols.Size = [int]$cols.Size - 1
         $lineWidth--
     }
+    while ($lineWidth -gt $width -and [int]$cols.Eta -gt 4) {
+        $cols.Eta = [int]$cols.Eta - 1
+        $lineWidth--
+    }
     return [pscustomobject]@{ Columns = $cols; LineWidth = $lineWidth }
 }
 
 function Get-ApplyEntryTotalBytes {
     param([object]$Entry)
-    if ($null -eq $Entry -or [bool]$Entry.IsDirectory -or $Entry.Action -eq "Delete") { return [int64]0 }
+    if ($null -eq $Entry -or $Entry.Action -eq "Delete") { return [int64]0 }
     try {
+        if ($null -ne $Entry.PSObject.Properties["CoveredTotalBytes"]) { return [int64]$Entry.CoveredTotalBytes }
+        if ([bool]$Entry.IsDirectory) { return [int64]0 }
         if ($Entry.Size -ne $null) { return [int64]$Entry.Size }
     } catch {}
     return [int64]0
@@ -483,13 +543,14 @@ function Get-ApplyProgressTiming {
     if ($Row.Status -ne "COPYING" -or $null -eq $Row.StartedAt) {
         if (-not [bool]$Row.IsComplete -and ($Row.Status -eq "MKDIR" -or $Row.Status -eq "DELETE")) { return [pscustomobject]@{ Speed = "--"; Eta = "Waiting" } }
         switch ($Row.Status) {
-            "WAIT" { return [pscustomobject]@{ Speed = "--"; Eta = "Waiting" } }
+            "WAITING" { return [pscustomobject]@{ Speed = "--"; Eta = "Waiting" } }
             "FAILED" { return [pscustomobject]@{ Speed = "--"; Eta = "Failed" } }
             "SKIPPED" { return [pscustomobject]@{ Speed = "--"; Eta = "Skipped" } }
             default { return [pscustomobject]@{ Speed = "--"; Eta = "Done" } }
         }
     }
-    $elapsed = ((Get-Date) - $Row.StartedAt).TotalSeconds
+    $startedUtc = ([datetime]$Row.StartedAt).ToUniversalTime()
+    $elapsed = ([datetime]::UtcNow - $startedUtc).TotalSeconds
     if ($elapsed -le 0) { return [pscustomobject]@{ Speed = "--"; Eta = "--" } }
     $speed = [double]$Row.CopiedBytes / $elapsed
     $remaining = [math]::Max(0, [double]$Row.TotalBytes - [double]$Row.CopiedBytes)
@@ -507,7 +568,7 @@ function Get-ApplyStatusColor {
     }
     if (-not $isComplete) {
         if ($status -eq "MKDIR" -or $status -eq "DELETE") { return "DarkYellow" }
-        if ($status -eq "WAIT") { return "DarkGray" }
+        if ($status -eq "WAITING") { return "DarkGray" }
     }
     switch ($status) {
         "DONE" { return "Green" }
@@ -572,15 +633,15 @@ function Get-ApplyProgressSummary {
     $skipped = @($Table.Rows | Where-Object { $_.Status -eq "SKIPPED" }).Count
     $failed = @($Table.Rows | Where-Object { $_.Status -eq "FAILED" }).Count
     $total = @($Table.Rows).Count
-    $current = if ($Table.CurrentIndex -ge 0) { [math]::Min($total, [int]$Table.CurrentIndex + 1) } else { 0 }
-    return ("Current: {0}/{1}    Done: {2}    Copying: {3}    Waiting: {4}    Skipped: {5}    Failed: {6}" -f $current, $total, $done, $copying, $waiting, $skipped, $failed)
+    $processed = @($Table.Rows | Where-Object { [bool]$_.IsComplete }).Count
+    return ("Processed: {0}/{1}    Done: {2}    Copying: {3}    Waiting: {4}    Skipped: {5}    Failed: {6}" -f $processed, $total, $done, $copying, $waiting, $skipped, $failed)
 }
 
 function Get-ApplyProgressQueuedStatus {
     param([object]$Entry)
     if ($Entry.Action -eq "Delete") { return "DELETE" }
     if ([bool]$Entry.IsDirectory) { return "MKDIR" }
-    return "WAIT"
+    return "WAITING"
 }
 
 function Test-ApplyProgressEntryVisible {
@@ -592,15 +653,20 @@ function Test-ApplyProgressEntryVisible {
 
 function New-ApplyProgressRow {
     param([object]$Entry, [int]$No)
+    $coveredCount = if ($null -ne $Entry.PSObject.Properties["CoveredCount"]) { [int]$Entry.CoveredCount } else { 0 }
+    $hasCoveredSize = ($null -ne $Entry.PSObject.Properties["CoveredTotalBytes"])
+    $hasFileSize = (-not [bool]$Entry.IsDirectory -and $Entry.Action -ne "Delete" -and $Entry.Size -ne $null)
+    $totalBytes = Get-ApplyEntryTotalBytes $Entry
+    $itemText = if ($coveredCount -gt 1) { "{0} [{1} items]" -f [string]$Entry.RelPath, $coveredCount } else { [string]$Entry.RelPath }
     return [pscustomobject]@{
         No = $No
         Status = Get-ApplyProgressQueuedStatus $Entry
         Pair = [string]$Entry.PairName
-        Item = [string]$Entry.RelPath
+        Item = $itemText
         CopiedBytes = [int64]0
-        TotalBytes = Get-ApplyEntryTotalBytes $Entry
+        TotalBytes = $totalBytes
         IsFileEntry = (-not [bool]$Entry.IsDirectory -and $Entry.Action -ne "Delete")
-        ShowsSize = (-not [bool]$Entry.IsDirectory -and $Entry.Action -ne "Delete" -and $Entry.Size -ne $null)
+        ShowsSize = ($Entry.Action -ne "Delete" -and ($hasCoveredSize -or $hasFileSize))
         IsComplete = $false
         StartedAt = $null
         LastRender = [datetime]::MinValue
@@ -629,10 +695,17 @@ function Get-ApplyProgressVisibleStart {
     $count = [int]$Table.VisibleCount
     if ($total -le $count) { return 0 }
     if ($CurrentIndex -lt 0) { return 0 }
-    $start = $CurrentIndex - 2
-    if ($start -lt 0) { $start = 0 }
+
+    $currentStart = [math]::Max(0, [int]$Table.VisibleStart)
+    $currentEnd = $currentStart + $count - 1
+    if ($CurrentIndex -ge $currentStart -and $CurrentIndex -le $currentEnd) {
+        return $currentStart
+    }
+
+    $start = [int]([math]::Floor($CurrentIndex / [double]$count) * $count)
     $maxStart = $total - $count
     if ($start -gt $maxStart) { $start = $maxStart }
+    if ($start -lt 0) { $start = 0 }
     return $start
 }
 
@@ -938,21 +1011,129 @@ function Resolve-DestinationPath {
 
 function Get-RelativePath {
     param([string]$Root, [string]$Path)
-    try {
-        $rootFull = [System.IO.Path]::GetFullPath($Root)
-        $pathFull = [System.IO.Path]::GetFullPath($Path)
-        if (-not $rootFull.EndsWith("\")) { $rootFull += "\" }
-        if ($pathFull.Length -lt $rootFull.Length) { return "" }
-        return $pathFull.Substring($rootFull.Length).TrimStart('\')
-    } catch {
-        return ""
-    }
+    if (-not (Test-PathInsideRoot $Root $Path)) { return "" }
+    return [IO.Path]::GetFullPath($Path).Substring([IO.Path]::GetFullPath($Root).TrimEnd('\').Length + 1)
 }
 
 function Join-PathSafe {
     param([string]$Base, [string]$Rel)
-    if ([string]::IsNullOrWhiteSpace($Rel) -or $Rel -eq ".") { return $Base }
-    try { return Join-Path $Base $Rel -ErrorAction Stop } catch { return [System.IO.Path]::Combine($Base, $Rel) }
+    if ([string]::IsNullOrWhiteSpace($Rel) -or $Rel -eq '.') { return $Base }
+    $relative = Normalize-QueueRelPath $Rel
+    $joined = [IO.Path]::GetFullPath([IO.Path]::Combine($Base, $relative))
+    if (-not (Test-PathInsideRoot $Base $joined)) { throw "Path escapes its configured root" }
+    return $joined
+}
+
+function Assert-NoReparsePath {
+    param([string]$Path)
+    $current = [IO.Path]::GetFullPath($Path)
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        $probe = Get-ExactPathProbe $current
+        if ($probe.State -eq 'Error') { throw "Cannot inspect path: $current ($($probe.ErrorMessage))" }
+        if ($probe.State -eq 'Exists' -and ($probe.Item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Reparse points are not supported: $current"
+        }
+        $parent = [IO.Path]::GetDirectoryName($current.TrimEnd('\'))
+        if ($parent -eq $current) { break }
+        $current = $parent
+    }
+}
+
+function Assert-PairLayout {
+    param([object]$Pair)
+    $source = Expand-TextPath ([string]$Pair.Source)
+    $destination = Resolve-DestinationPath ([string]$Pair.Dest)
+    foreach ($path in @($source,$destination)) {
+        if ($path -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+(?:\\|$))' -or $path -match '^\\\\[?.]\\') { throw 'Pairs require absolute drive or UNC paths' }
+        Assert-NoReparsePath $path
+    }
+    $source = [IO.Path]::GetFullPath($source).TrimEnd('\')
+    $destination = [IO.Path]::GetFullPath($destination).TrimEnd('\')
+    if ($source -ieq $destination -or (Test-PathInsideRoot $source $destination) -or (Test-PathInsideRoot $destination $source)) { throw 'Source and destination must not overlap' }
+    foreach ($other in @(Get-Pairs)) {
+        $otherSource = [IO.Path]::GetFullPath((Expand-TextPath ([string]$other.Source))).TrimEnd('\')
+        if ($destination -ieq $otherSource -or (Test-PathInsideRoot $otherSource $destination) -or (Test-PathInsideRoot $destination $otherSource)) { throw 'Destination overlaps a configured source' }
+    }
+}
+
+function Get-SafeEntryPaths {
+    param([object]$Pair, [object]$Entry)
+    Assert-PairLayout $Pair
+    $rel = Normalize-QueueRelPath ([string]$Entry.RelPath)
+    $source = Join-PathSafe (Expand-TextPath ([string]$Pair.Source)) $rel
+    $destination = Join-PathSafe (Resolve-DestinationPath ([string]$Pair.Dest)) $rel
+    foreach ($saved in @(@('Source',$source),@('Dest',$destination))) {
+        $value = [string]$Entry.($saved[0])
+        if ($value -and [IO.Path]::GetFullPath($value) -ine $saved[1]) { throw 'Pair paths changed since this item was queued; review pending work' }
+    }
+    Assert-NoReparsePath $source
+    Assert-NoReparsePath $destination
+    return [pscustomobject]@{ Source=$source; Destination=$destination }
+}
+
+function Get-SafeTreeItems {
+    param([string]$Root, [object]$Pair = $null, [string]$EquivalentRoot = '')
+    Assert-NoReparsePath $Root
+    $stack = [Collections.Generic.Stack[string]]::new()
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $directory = $stack.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+            $equivalent = if ($EquivalentRoot) { Join-PathSafe $EquivalentRoot (Get-RelativePath $Root $item.FullName) } else { $item.FullName }
+            if ($null -ne $Pair -and (Test-Excluded $Pair $equivalent $item.PSIsContainer)) { continue }
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Reparse point encountered: $($item.FullName)" }
+            $item
+            if ($item.PSIsContainer) { $stack.Push($item.FullName) }
+        }
+    }
+}
+
+function Remove-OwnedPath {
+    param([string]$Root, [string]$Path, [switch]$Recurse)
+    if (-not (Test-PathInsideRoot $Root $Path)) { throw 'Refusing removal outside the specified root' }
+    Assert-NoReparsePath $Path
+    $probe = Get-ExactPathProbe $Path
+    if ($probe.State -eq 'Missing') { return }
+    if ($probe.State -ne 'Exists') { throw 'Removal target is unreadable' }
+    if ($probe.IsDirectory) {
+        if ($Recurse) {
+            $items = @(Get-SafeTreeItems $Path)
+            foreach ($file in @($items | Where-Object { -not $_.PSIsContainer })) {
+                [IO.File]::SetAttributes($file.FullName, ($file.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)))
+                [IO.File]::Delete($file.FullName)
+            }
+            foreach ($dir in @($items | Where-Object PSIsContainer | Sort-Object { $_.FullName.Length } -Descending)) { [IO.Directory]::Delete($dir.FullName) }
+        }
+        [IO.Directory]::Delete($Path)
+    } else {
+        [IO.File]::SetAttributes($Path, ($probe.Item.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)))
+        [IO.File]::Delete($Path)
+    }
+    if ((Get-ExactPathProbe $Path).State -ne 'Missing') { throw 'Removal could not be verified' }
+}
+
+function Remove-VerifiedDestination {
+    param([object]$Pair, [string]$RelPath)
+    $source = Join-PathSafe $Pair.Source $RelPath
+    $root = Resolve-DestinationPath $Pair.Dest
+    $destination = Join-PathSafe $root $RelPath
+    Assert-PairLayout $Pair
+    Assert-NoReparsePath $source
+    Assert-NoReparsePath $destination
+    $probe = Get-ExactPathProbe $destination
+    if ($probe.State -eq 'Error') { throw 'Destination check failed' }
+    if ($probe.State -eq 'Exists' -and $probe.IsDirectory) {
+        # Never remove excluded descendants by deleting their parent.
+        foreach ($item in @(Get-SafeTreeItems $destination)) {
+            $equivalent = Join-PathSafe $source (Get-RelativePath $destination $item.FullName)
+            if (Test-Excluded $Pair $equivalent $item.PSIsContainer) { throw 'Directory contains excluded content; delete retained' }
+        }
+    }
+    $sourceRoot = Get-ExactPathProbe $Pair.Source
+    $destRoot = Get-ExactPathProbe ([IO.Path]::GetPathRoot($root))
+    if ($sourceRoot.State -ne 'Exists' -or -not $sourceRoot.IsDirectory -or $destRoot.State -ne 'Exists' -or -not $destRoot.IsDirectory) { throw 'Source or destination root unavailable' }
+    if ((Get-ExactPathProbe $source).State -ne 'Missing') { throw 'Source restored or indeterminate; delete retained' }
+    if ($probe.State -eq 'Exists') { Remove-OwnedPath $root $destination -Recurse }
 }
 
 function Test-NameMatchesAny {
@@ -964,18 +1145,58 @@ function Test-NameMatchesAny {
     return $false
 }
 
+function Test-RelativeDirExcluded {
+    param([string]$RelPath, [string]$Pattern)
+    $p = ([string]$Pattern) -replace '/', '\'
+    $p = $p.Trim('\')
+    if ([string]::IsNullOrWhiteSpace($p)) { return $false }
+    if ($p -notmatch '\\') { return $false }
+    return ($RelPath -like $p -or $RelPath -like ($p + "\*"))
+}
+
+function Convert-PairExcludeDirForRobocopy {
+    param([object]$Pair, [string]$Pattern)
+    $p = ([string]$Pattern) -replace '/', '\'
+    if ([string]::IsNullOrWhiteSpace($p)) { return $null }
+    if ($p -notmatch '\\' -or [System.IO.Path]::IsPathRooted($p)) { return $p }
+    return Join-PathSafe $Pair.Source $p.TrimStart('\')
+}
+
 function Test-Excluded {
     param([object]$Pair, [string]$FullPath, [Nullable[bool]]$IsDirectory = $null)
     $rel = Get-RelativePath $Pair.Source $FullPath
     if ([string]::IsNullOrWhiteSpace($rel)) { return $false }
+    if ($rel -match '(?i)(?:^|\\)\..+\.(?:mqtmp|mqbackup|mqdirtemp|mbtmp|mbbackup)-[0-9a-f]{32}(?:\\|$)') { return $true }
     $relNorm = $rel -replace '/', '\'
     $segments = @($relNorm -split '\\' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $isDirectoryKnown = ($IsDirectory -ne $null)
+    if (-not $isDirectoryKnown) {
+        try {
+            if (Test-Path -LiteralPath $FullPath) {
+                $IsDirectory = [bool](Test-Path -LiteralPath $FullPath -PathType Container)
+                $isDirectoryKnown = $true
+            }
+        } catch {}
+    }
     $dirPatterns = @()
     $dirPatterns += @(Get-Array $script:Config.GlobalExcludeDirs)
-    $dirPatterns += @(Get-MapArray "PairExcludeDirs" $Pair.Name)
-    foreach ($seg in $segments) {
+    $pairDirPatterns = @(Get-MapArray "PairExcludeDirs" $Pair.Name)
+    $dirPatterns += $pairDirPatterns
+    $dirSegments = $segments
+    if ($isDirectoryKnown -and -not [bool]$IsDirectory -and $segments.Count -gt 0) {
+        $dirSegments = if ($segments.Count -gt 1) { @($segments[0..($segments.Count - 2)]) } else { @() }
+    }
+    foreach ($seg in $dirSegments) {
         if (Test-NameMatchesAny $seg $dirPatterns) { return $true }
     }
+    $directoryRel = $relNorm
+    if ($isDirectoryKnown -and -not [bool]$IsDirectory) {
+        $directoryRel = Split-Path -Path $relNorm -Parent
+    }
+    foreach ($pat in $pairDirPatterns) {
+        if (Test-RelativeDirExcluded $directoryRel ([string]$pat)) { return $true }
+    }
+    if ($isDirectoryKnown -and [bool]$IsDirectory) { return $false }
     $filePatterns = @()
     $filePatterns += @(Get-Array $script:Config.GlobalExcludeFiles)
     $filePatterns += @(Get-MapArray "PairExcludeFiles" $Pair.Name)
@@ -1000,6 +1221,152 @@ function Test-DestRootAvailable {
     }
 }
 
+function Initialize-PhysicalPathApi {
+    if ("MiraQueue.NativePath" -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace MiraQueue {
+    public static class NativePath {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFile(
+            string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+            uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            SafeFileHandle file, StringBuilder path, uint pathLength, uint flags);
+
+        public static string GetFinalPath(string path) {
+            using (SafeFileHandle handle = CreateFile(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+                if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+                StringBuilder buffer = new StringBuilder(32768);
+                uint length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, 0);
+                if (length == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+                if (length >= buffer.Capacity) throw new InvalidOperationException("Resolved path is too long.");
+                string value = buffer.ToString();
+                if (value.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + value.Substring(8);
+                if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) return value.Substring(4);
+                return value;
+            }
+        }
+    }
+}
+'@
+}
+
+function Get-PhysicalDestinationKey {
+    param([string]$Destination)
+    try {
+        $full = [System.IO.Path]::GetFullPath($Destination)
+        $candidate = Split-Path -Parent $full
+        $remaining = New-Object System.Collections.Generic.List[string]
+        $remaining.Insert(0, (Split-Path -Leaf $full))
+        while (-not [System.IO.Directory]::Exists($candidate)) {
+            $leaf = Split-Path -Leaf $candidate
+            $parent = Split-Path -Parent $candidate
+            if ([string]::IsNullOrWhiteSpace($leaf) -or [string]::IsNullOrWhiteSpace($parent) -or $parent -eq $candidate) {
+                throw "No existing destination ancestor"
+            }
+            $remaining.Insert(0, $leaf)
+            $candidate = $parent
+        }
+        Initialize-PhysicalPathApi
+        $resolved = [MiraQueue.NativePath]::GetFinalPath($candidate)
+        foreach ($segment in $remaining) { $resolved = [System.IO.Path]::Combine($resolved, $segment) }
+        return [System.IO.Path]::GetFullPath($resolved).TrimEnd('\').ToUpperInvariant()
+    } catch {
+        Write-Log "WARN" ("Could not resolve physical destination path; using conservative serialization: " + $Destination)
+        return "__UNRESOLVED_PHYSICAL_DESTINATION__"
+    }
+}
+
+function Test-TcpPortQuick {
+    param(
+        [string]$Server,
+        [int]$Port = 445,
+        [int]$TimeoutMs = 350
+    )
+    if ([string]::IsNullOrWhiteSpace($Server)) { return $false }
+    $client = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $async = $client.BeginConnect($Server, $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            return $false
+        }
+        $client.EndConnect($async)
+        return [bool]$client.Connected
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $client) { $client.Close() }
+    }
+}
+
+function Test-DestRootAvailableFast {
+    param([string]$DestPath)
+    $resolved = Resolve-DestinationPath $DestPath
+    try {
+        $root = [System.IO.Path]::GetPathRoot($resolved)
+        if ([string]::IsNullOrWhiteSpace($root)) { return $false }
+        $cacheKey = $root.ToLowerInvariant()
+        $now = Get-Date
+        if ($script:DriveStatusCache.ContainsKey($cacheKey)) {
+            $cached = $script:DriveStatusCache[$cacheKey]
+            if ($null -ne $cached -and $cached.Expires -gt $now) {
+                return [bool]$cached.Online
+            }
+        }
+
+        $online = $false
+        if ($root -match '^\\\\([^\\]+)\\') {
+            $online = Test-TcpPortQuick -Server $Matches[1] -Port 445 -TimeoutMs 350
+        } else {
+            $online = Test-Path -LiteralPath $root -PathType Container -ErrorAction SilentlyContinue
+        }
+
+        $script:DriveStatusCache[$cacheKey] = [pscustomobject]@{
+            Online = [bool]$online
+            Expires = $now.AddSeconds(2)
+        }
+        return [bool]$online
+    } catch {
+        return $false
+    }
+}
+
+
+
+function Enter-ApplyLock {
+    param([string]$Operation = 'Mirror operation', [switch]$Quiet)
+    if ($null -ne $script:ApplyLockStream) { return $false }
+    if ([string]::IsNullOrWhiteSpace($script:ApplyLockPath)) { throw 'Apply lock path is not initialized' }
+    try {
+        # Holding the handle avoids PID reuse, stale-age stealing and release/reacquire races.
+        $script:ApplyLockStream = [IO.File]::Open($script:ApplyLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $script:ApplyLockStream.SetLength(0)
+        $bytes = [Text.Encoding]::UTF8.GetBytes([string]$PID)
+        $script:ApplyLockStream.Write($bytes,0,$bytes.Length)
+        $script:ApplyLockStream.Flush()
+        return $true
+    } catch {
+        if ($null -ne $script:ApplyLockStream) { $script:ApplyLockStream.Dispose(); $script:ApplyLockStream=$null }
+        Write-Log 'LOCK' ("${Operation} blocked: " + $_.Exception.Message)
+        if (-not $Quiet) { Write-Color "${Operation} blocked: another operation owns the lock or it is inaccessible." 'Yellow'; Wait-Back }
+        return $false
+    }
+}
+
+function Exit-ApplyLock {
+    if ($null -ne $script:ApplyLockStream) { $script:ApplyLockStream.Dispose(); $script:ApplyLockStream=$null }
+    # The reusable lock file is removed only by uninstall. An unlocked file is harmless.
+}
+
 function Find-PairByName {
     param([string]$Name)
     foreach ($pair in Get-Pairs) {
@@ -1009,7 +1376,16 @@ function Find-PairByName {
 }
 
 function New-QueueEntry {
-    param([object]$Pair, [string]$FullPath, [string]$Action, [Nullable[bool]]$KnownIsDirectory = $null)
+    param(
+        [object]$Pair,
+        [string]$FullPath,
+        [string]$Action,
+        [Nullable[bool]]$KnownIsDirectory = $null,
+        [ValidateSet("Created","Changed","Deleted","RenamedOld","RenamedNew","Snapshot","Legacy")]
+        [string]$EventKind = "Legacy",
+        [ValidateSet("Absent","Present","Unknown")]
+        [string]$BaselineState = "Unknown"
+    )
     $rel = Get-RelativePath $Pair.Source $FullPath
     if ([string]::IsNullOrWhiteSpace($rel)) { return $null }
     $exists = Test-Path -LiteralPath $FullPath
@@ -1025,11 +1401,16 @@ function New-QueueEntry {
             $lastWrite = $fi.LastWriteTimeUtc.ToString("o")
         } catch {}
     }
-    [pscustomobject]@{
+    $operation = if ($Action -eq "Delete") { "Delete" } elseif ($BaselineState -eq "Absent") { "Add" } else { "Update" }
+    [pscustomobject][ordered]@{
+        SchemaVersion = 2
         Id = [guid]::NewGuid().ToString()
         TimeUtc = (Get-Date).ToUniversalTime().ToString("o")
         PairName = [string]$Pair.Name
         Action = [string]$Action
+        Operation = $operation
+        EventKind = $EventKind
+        BaselineState = $BaselineState
         RelPath = [string]$rel
         Source = [string]$FullPath
         Dest = [string](Join-PathSafe (Resolve-DestinationPath $Pair.Dest) $rel)
@@ -1039,76 +1420,911 @@ function New-QueueEntry {
     }
 }
 
-function Append-QueueEntry {
+function ConvertTo-UtcTimestamp {
+    param([object]$Value)
+    if ($Value -is [datetime]) {
+        $date=[datetime]$Value
+        if ($date.Kind -eq [DateTimeKind]::Unspecified) { $date=[datetime]::SpecifyKind($date,[DateTimeKind]::Utc) }
+        return $date.ToUniversalTime().ToString('o')
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Value)) { throw 'Missing UTC timestamp' }
+    return [datetimeoffset]::Parse([string]$Value,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime.ToString('o')
+}
+
+function ConvertTo-QueueV2Entry {
     param([object]$Entry)
-    if ($null -eq $Entry) { return }
-    try {
-        $json = $Entry | ConvertTo-Json -Depth 10 -Compress
-        Add-Content -LiteralPath $script:QueuePath -Value $json -Encoding UTF8
-        Write-Log "QUEUE" ("{0} {1} :: {2}" -f $Entry.Action, $Entry.PairName, $Entry.RelPath)
-    } catch {
-        Write-Log "ERROR" "Append queue failed: $($_.Exception.Message)"
+    if ($null -eq $Entry -or [string]::IsNullOrWhiteSpace([string]$Entry.PairName) -or [string]::IsNullOrWhiteSpace([string]$Entry.RelPath)) { throw 'Queue record requires PairName and RelPath' }
+    if ([string]$Entry.PairName -match '[|\x00-\x1f]') { throw 'Invalid pair name in queue' }
+    if ([string]$Entry.Action -notin @('Upsert','Delete')) { throw 'Unrecognized queue action' }
+    if ($null -ne $Entry.PSObject.Properties['SchemaVersion'] -and [string]$Entry.SchemaVersion -notin @('1','2')) { throw 'Unsupported queue schema; original queue preserved' }
+    if ($null -ne $Entry.PSObject.Properties['IsDirectory'] -and $Entry.IsDirectory -isnot [bool]) { throw 'Invalid queue directory flag' }
+    if ($null -ne $Entry.PSObject.Properties['BaselineState'] -and [string]$Entry.BaselineState -notin @('Absent','Present','Unknown')) { throw 'Invalid queue baseline' }
+    $baseline = "Unknown"
+    if ($null -ne $Entry.PSObject.Properties["BaselineState"] -and [string]$Entry.BaselineState -in @("Absent","Present","Unknown")) {
+        $baseline = [string]$Entry.BaselineState
+    }
+    $eventKind = if ($null -ne $Entry.PSObject.Properties["EventKind"] -and -not [string]::IsNullOrWhiteSpace([string]$Entry.EventKind)) { [string]$Entry.EventKind } else { "Legacy" }
+    $action = if ([string]$Entry.Action -eq "Delete") { "Delete" } else { "Upsert" }
+    $operation = if ($action -eq "Delete") { "Delete" } elseif ($baseline -eq "Absent") { "Add" } else { "Update" }
+    return [pscustomobject][ordered]@{
+        SchemaVersion = 2
+        Id = $(if ($null -ne $Entry.PSObject.Properties["Id"] -and -not [string]::IsNullOrWhiteSpace([string]$Entry.Id)) { [string]$Entry.Id } else { [guid]::NewGuid().ToString() })
+        TimeUtc = $(if ($null -ne $Entry.PSObject.Properties["TimeUtc"]) { ConvertTo-UtcTimestamp $Entry.TimeUtc } else { (Get-Date).ToUniversalTime().ToString("o") })
+        PairName = [string]$Entry.PairName
+        Action = $action
+        Operation = $operation
+        EventKind = $eventKind
+        BaselineState = $baseline
+        RelPath = Normalize-QueueRelPath ([string]$Entry.RelPath)
+        Source = [string]$Entry.Source
+        Dest = [string]$Entry.Dest
+        IsDirectory = [bool]$Entry.IsDirectory
+        Size = $Entry.Size
+        LastWriteTimeUtc = $(if ($null -eq $Entry.LastWriteTimeUtc -or [string]::IsNullOrWhiteSpace([string]$Entry.LastWriteTimeUtc)) { $null } else { ConvertTo-UtcTimestamp $Entry.LastWriteTimeUtc })
     }
 }
 
-function Read-QueueEntries {
-    if (!(Test-Path -LiteralPath $script:QueuePath)) { return @() }
-    $items = New-Object System.Collections.Generic.List[object]
+function Add-PendingMetric {
+    param([string]$Name, [long]$Started = 0, [long]$Count = 1, [string]$Pair = "", [string]$Operation = "")
+    $perf = $script:PendingPerformance
+    if ($null -eq $perf) { return }
+    $elapsed = if ($Started -gt 0) { ([Diagnostics.Stopwatch]::GetTimestamp() - $Started) * 1000.0 / [Diagnostics.Stopwatch]::Frequency } else { 0.0 }
+    $perf.Counts[$Name] = [long]$perf.Counts[$Name] + $Count
+    $perf.Milliseconds[$Name] = [double]$perf.Milliseconds[$Name] + $elapsed
+    if (-not [string]::IsNullOrWhiteSpace($Pair)) {
+        if (-not $perf.ByPair.ContainsKey($Pair)) { $perf.ByPair[$Pair] = @{ Counts=@{}; Milliseconds=@{} } }
+        $bucket = $perf.ByPair[$Pair]
+        $bucket.Counts[$Name] = [long]$bucket.Counts[$Name] + $Count
+        $bucket.Milliseconds[$Name] = [double]$bucket.Milliseconds[$Name] + $elapsed
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Operation)) {
+        if (-not $perf.ByOperation.ContainsKey($Operation)) { $perf.ByOperation[$Operation] = @{ Counts=@{}; Milliseconds=@{} } }
+        $bucket = $perf.ByOperation[$Operation]
+        $bucket.Counts[$Name] = [long]$bucket.Counts[$Name] + $Count
+        $bucket.Milliseconds[$Name] = [double]$bucket.Milliseconds[$Name] + $elapsed
+    }
+}
+
+function Invoke-PendingPathProbe {
+    param([string]$Path, [string]$Kind = "DestinationProbe", [string]$Pair = "", [string]$Operation = "")
+    $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+    try { return (Get-ExactPathProbe $Path) }
+    finally { if ($null -ne $script:PendingPerformance) { Add-PendingMetric $Kind $started 1 $Pair $Operation } }
+}
+
+function Enter-QueueMutex {
+    param([int]$TimeoutMs = 10000)
+    $mutex = $null
+    $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
     try {
-        Get-Content -LiteralPath $script:QueuePath -Encoding UTF8 -ErrorAction SilentlyContinue | ForEach-Object {
-            if ([string]::IsNullOrWhiteSpace([string]$_)) { return }
-            try { $items.Add(($_ | ConvertFrom-Json)) } catch { Write-Log "WARN" "Skipped malformed queue line" }
+        $mutex = New-Object System.Threading.Mutex($false, $script:QueueMutexName)
+        try {
+            if (-not $mutex.WaitOne($TimeoutMs, $false)) {
+                if ($null -ne $script:PendingPerformance) { Add-PendingMetric "MutexTimeout" }
+                $mutex.Dispose(); return $null
+            }
+        } catch [System.Threading.AbandonedMutexException] {}
+        if ($null -ne $script:PendingPerformance) {
+            $mutex | Add-Member -NotePropertyName PendingHeldSince -NotePropertyValue ([Diagnostics.Stopwatch]::GetTimestamp())
         }
-    } catch {}
+        return $mutex
+    } catch {
+        if ($null -ne $mutex) { try { $mutex.Dispose() } catch {} }
+        return $null
+    } finally { if ($null -ne $script:PendingPerformance) { Add-PendingMetric "MutexWait" $started } }
+}
+
+function Exit-QueueMutex {
+    param([object]$Mutex)
+    if ($null -eq $Mutex) { return }
+    if ($null -ne $script:PendingPerformance -and $null -ne $Mutex.PSObject.Properties['PendingHeldSince']) {
+        Add-PendingMetric "MutexHeld" ([long]$Mutex.PendingHeldSince)
+    }
+    try { $Mutex.ReleaseMutex() | Out-Null } catch {}
+    try { $Mutex.Dispose() } catch {}
+}
+
+function Read-QueueEntriesUnlocked {
+    $items = [Collections.Generic.List[object]]::new()
+    $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+    try { $lines = [IO.File]::ReadAllLines($script:QueuePath, [Text.Encoding]::UTF8) }
+    finally { if ($null -ne $script:PendingPerformance) { Add-PendingMetric 'QueueRead' $started } }
+    $lineNumber = 0
+    foreach ($line in $lines) {
+        $lineNumber++
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try {
+            $record = $line | ConvertFrom-Json -ErrorAction Stop
+            $null = ConvertTo-QueueV2Entry $record
+            $items.Add($record)
+        } catch { throw "Invalid queue record at line ${lineNumber}; queue preserved: $($_.Exception.Message)" }
+    }
     return @($items.ToArray())
+}
+
+function Read-QueueEntries {
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) { throw 'Queue read timed out waiting for lock' }
+    try { return @(Read-QueueEntriesUnlocked) } finally { Exit-QueueMutex $mutex }
+}
+
+function Get-QueuePathNode {
+    param([hashtable]$PathIndex, [object]$Entry, [switch]$Create)
+    $pairKey = ([string]$Entry.PairName).ToUpperInvariant()
+    if (-not $PathIndex.ContainsKey($pairKey)) {
+        if (-not $Create) { return $null }
+        $PathIndex[$pairKey] = @{ Children=@{}; Key=$null }
+    }
+    $node = $PathIndex[$pairKey]
+    foreach ($segment in ((Normalize-QueueRelPath ([string]$Entry.RelPath)).ToUpperInvariant().Split('\'))) {
+        if (-not $node.Children.ContainsKey($segment)) {
+            if (-not $Create) { return $null }
+            $node.Children[$segment] = @{ Children=@{}; Key=$null }
+        }
+        $node = $node.Children[$segment]
+    }
+    return $node
+}
+
+function Remove-QueueDescendants {
+    param([hashtable]$Dictionary, [object]$Parent, [switch]$OnlyNew, [hashtable]$PathIndex = $null)
+    if ($null -ne $PathIndex) {
+        $parentNode = Get-QueuePathNode $PathIndex $Parent
+        if ($null -eq $parentNode) { return }
+        $pendingNodes = [System.Collections.Generic.Stack[object]]::new()
+        foreach ($child in $parentNode.Children.Values) { $pendingNodes.Push($child) }
+        while ($pendingNodes.Count -gt 0) {
+            $node = $pendingNodes.Pop()
+            foreach ($child in $node.Children.Values) { $pendingNodes.Push($child) }
+            if ($null -ne $node.Key -and $Dictionary.ContainsKey($node.Key)) {
+                if (-not $OnlyNew -or [string]$Dictionary[$node.Key].BaselineState -eq "Absent") {
+                    $Dictionary.Remove($node.Key)
+                    $node.Key = $null
+                }
+            }
+        }
+        if (-not $OnlyNew) { $parentNode.Children.Clear() }
+        return
+    }
+    # Small standalone merges (e.g. the debounce slot) do not need an index.
+    $prefix = (Normalize-QueueRelPath ([string]$Parent.RelPath)) + "\"
+    foreach ($key in @($Dictionary.Keys)) {
+        $candidate = $Dictionary[$key]
+        if ([string]$candidate.PairName -ine [string]$Parent.PairName) { continue }
+        $rel = Normalize-QueueRelPath ([string]$candidate.RelPath)
+        if (-not $rel.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($OnlyNew -and [string]$candidate.BaselineState -ne "Absent") { continue }
+        $Dictionary.Remove($key)
+    }
+}
+
+function Merge-QueueEntryState {
+    param([hashtable]$Dictionary, [object]$Incoming, [hashtable]$PathIndex = $null)
+    $entry = ConvertTo-QueueV2Entry $Incoming
+    if ($null -eq $entry) { return }
+    $key = Get-QueueEntryKey $entry
+    $existing = if ($Dictionary.ContainsKey($key)) { $Dictionary[$key] } else { $null }
+
+    if ($entry.Action -eq "Delete") {
+        Remove-QueueDescendants -Dictionary $Dictionary -Parent $entry -PathIndex $PathIndex
+        if ($null -ne $existing -and $existing.Action -eq "Upsert" -and [string]$existing.BaselineState -eq "Absent") {
+            $Dictionary.Remove($key)
+            return
+        }
+        if ([string]$entry.BaselineState -eq "Absent") {
+            return
+        }
+        if ($null -ne $existing -and [string]$existing.BaselineState -ne "Unknown") {
+            $entry.BaselineState = [string]$existing.BaselineState
+        }
+        $entry.Operation = "Delete"
+        $Dictionary[$key] = $entry
+        if ($null -ne $PathIndex) { (Get-QueuePathNode $PathIndex $entry -Create).Key = $key }
+        return
+    }
+
+    if ($null -ne $existing) {
+        if ([string]$existing.BaselineState -eq "Absent") {
+            $entry.BaselineState = "Absent"
+        } elseif ($existing.Action -eq "Delete") {
+            $entry.BaselineState = $(if ([string]$existing.BaselineState -eq "Absent") { "Absent" } elseif ([string]$existing.BaselineState -eq "Unknown") { "Unknown" } else { "Present" })
+        } elseif ([string]$entry.BaselineState -eq "Unknown") {
+            $entry.BaselineState = [string]$existing.BaselineState
+        }
+    }
+    $entry.Operation = $(if ([string]$entry.BaselineState -eq "Absent") { "Add" } else { "Update" })
+    $Dictionary[$key] = $entry
+    if ($null -ne $PathIndex) { (Get-QueuePathNode $PathIndex $entry -Create).Key = $key }
+}
+
+function Get-QueueDictionary {
+    param([object[]]$Entries, [hashtable]$PathIndex = $null)
+    $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+    if ($null -eq $PathIndex) { $PathIndex = @{} }
+    $dict = @{}
+    try {
+        foreach ($entry in $Entries) { Merge-QueueEntryState -Dictionary $dict -Incoming $entry -PathIndex $PathIndex }
+        return $dict
+    } finally { if ($null -ne $script:PendingPerformance) { Add-PendingMetric "QueueMerge" $started $Entries.Count } }
 }
 
 function Get-LatestQueueEntries {
     param([object[]]$Entries)
-    $dict = @{}
-    foreach ($e in $Entries) {
-        if ($null -eq $e.PairName -or $null -eq $e.RelPath) { continue }
-        $key = ($e.PairName + "|" + $e.RelPath).ToUpperInvariant()
-        $dict[$key] = $e
-    }
-    return @($dict.Values | Sort-Object PairName, RelPath)
+    $dict = Get-QueueDictionary $Entries
+    $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+    try { return @($dict.Values | Sort-Object PairName, RelPath) }
+    finally { if ($null -ne $script:PendingPerformance) { Add-PendingMetric "QueueSort" $started $dict.Count } }
 }
 
 function Remove-OrphanedUpserts {
     param([object[]]$Entries)
-    $deleteKeys = @{}
-    foreach ($e in $Entries) {
-        if ($e.Action -eq "Delete") {
-            $key = ($e.PairName + "|" + $e.RelPath).ToUpperInvariant()
-            $deleteKeys[$key] = $true
+    $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+    try {
+        $deleteKeys = @{}
+        foreach ($entry in $Entries) {
+            if ($entry.Action -eq "Delete") { $deleteKeys[(Get-QueueEntryKey $entry)] = $true }
+        }
+        if ($deleteKeys.Count -eq 0) { return $Entries }
+        foreach ($entry in $Entries) {
+            if ($entry.Action -ne "Upsert") { $entry; continue }
+            $rel = Normalize-QueueRelPath ([string]$entry.RelPath)
+            $covered = $false
+            while ($rel.Length -gt 0) {
+                if ($deleteKeys.ContainsKey(($entry.PairName + "|" + $rel).ToUpperInvariant())) { $covered = $true; break }
+                $separator = $rel.LastIndexOf('\')
+                if ($separator -lt 0) { break }
+                $rel = $rel.Substring(0, $separator)
+            }
+            if (-not $covered) { $entry }
+        }
+    } finally { if ($null -ne $script:PendingPerformance) { Add-PendingMetric "QueueFilter" $started $Entries.Count } }
+}
+
+function Write-QueueMetaUnlocked {
+    param([object[]]$Entries)
+    $queueItem = Get-Item -LiteralPath $script:QueuePath -Force -ErrorAction SilentlyContinue
+    $meta = [pscustomobject][ordered]@{
+        SchemaVersion = 2
+        EffectiveCount = @($Entries).Count
+        AddCount = @($Entries | Where-Object { $_.Operation -eq "Add" }).Count
+        UpdateCount = @($Entries | Where-Object { $_.Operation -eq "Update" }).Count
+        DeleteCount = @($Entries | Where-Object { $_.Operation -eq "Delete" }).Count
+        UpdatedUtc = (Get-Date).ToUniversalTime().ToString("o")
+        QueueLength = $(if ($queueItem) { [int64]$queueItem.Length } else { 0 })
+        QueueWriteTicks = $(if ($queueItem) { [int64]$queueItem.LastWriteTimeUtc.Ticks } else { 0 })
+    }
+    $tmp = "$script:QueueMetaPath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+    $replaceBackup = "$script:QueueMetaPath.$PID.replace.bak"
+    try {
+        [System.IO.File]::WriteAllText($tmp, ($meta | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $script:QueueMetaPath) { [System.IO.File]::Replace($tmp, $script:QueueMetaPath, $replaceBackup) }
+        else { Move-Item -LiteralPath $tmp -Destination $script:QueueMetaPath -Force -ErrorAction Stop }
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-OwnedPath ([IO.Path]::GetDirectoryName($tmp)) $tmp }
+        if (Test-Path -LiteralPath $replaceBackup) { Remove-OwnedPath $script:DataDir $replaceBackup }
+    }
+}
+
+function Get-QueueFileFingerprint {
+    try {
+        $item = Get-Item -LiteralPath $script:QueuePath -Force -ErrorAction Stop
+        return ("{0}|{1}" -f [int64]$item.Length, [int64]$item.LastWriteTimeUtc.Ticks)
+    } catch {
+        return "MISSING"
+    }
+}
+
+
+
+
+
+
+
+function Get-PendingPairIndex {
+    $index = @{}
+    foreach ($pair in @(Get-Pairs)) {
+        $key = ([string]$pair.Name).ToUpperInvariant()
+        if ($index.ContainsKey($key)) { continue } # Preserve Find-PairByName's first-match rule.
+        $destination = Resolve-DestinationPath ([string]$pair.Dest)
+        $index[$key] = [pscustomobject]@{
+            Pair=$pair; Source=[string]$pair.Source; Destination=$destination
+            Root=[string][System.IO.Path]::GetPathRoot($destination)
         }
     }
-    return @($Entries | Where-Object {
-        if ($_.Action -ne "Upsert") { return $true }
-        $rel = [string]$_.RelPath
-        $parts = $rel.Split('\')
-        for ($i = 0; $i -lt $parts.Count; $i++) {
-            $parentRel = ($parts[0..$i] -join '\')
-            $parentKey = ($_.PairName + "|" + $parentRel).ToUpperInvariant()
-            if ($deleteKeys.ContainsKey($parentKey)) { return $false }
+    return $index
+}
+
+function Get-PendingDirectoryNames {
+    param([string]$Directory, [int]$Limit, [System.Collections.Generic.HashSet[string]]$Wanted)
+    # Names only, including hidden/system entries. No recursion and no per-child stat.
+    $found = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $enumerator = $null
+    $count = 0
+    $complete = $false
+    $errorText = ""
+    $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+    try {
+        $enumerator = [System.IO.Directory]::EnumerateFileSystemEntries($Directory).GetEnumerator()
+        while ($count -lt $Limit) {
+            if (-not $enumerator.MoveNext()) { $complete = $true; break }
+            $count++
+            $name = [System.IO.Path]::GetFileName([string]$enumerator.Current)
+            if ($Wanted.Contains($name)) { [void]$found.Add($name) }
+            if ($found.Count -eq $Wanted.Count) { break }
         }
+    } catch { $errorText = Format-ErrorSummary $_.Exception.Message }
+    finally {
+        if ($null -ne $enumerator) { $enumerator.Dispose() }
+        if ($null -ne $script:PendingPerformance) {
+            Add-PendingMetric "DirectoryEnumeration" $started
+            Add-PendingMetric "EnumeratedNames" 0 $count
+            if ($errorText) { Add-PendingMetric "EnumerationError" }
+            elseif (-not $complete -and $found.Count -lt $Wanted.Count) { Add-PendingMetric "EnumerationLimit" }
+        }
+    }
+    return [pscustomobject]@{ Found=$found; Complete=$complete; Error=$errorText; Count=$count }
+}
+
+function Add-PendingDiscoveryAttribution {
+    param([object[]]$Requests, [double]$ElapsedMs)
+    # A shared directory read has no unique owner. Allocate its time by logical request count;
+    # these values are explicitly labelled and are not added again to the global physical total.
+    if ($null -eq $script:PendingPerformance -or $Requests.Count -eq 0) { return }
+    foreach ($request in $Requests) {
+        foreach ($dimension in @('ByPair', 'ByOperation')) {
+            $key = if ($dimension -eq 'ByPair') { [string]$request.PairName } else { [string]$request.Operation }
+            $map = $script:PendingPerformance.$dimension
+            if (-not $map.ContainsKey($key)) { $map[$key] = @{ Counts=@{}; Milliseconds=@{} } }
+            $map[$key].Milliseconds['AllocatedEnumeration'] = [double]$map[$key].Milliseconds['AllocatedEnumeration'] + $ElapsedMs / $Requests.Count
+        }
+    }
+}
+
+function Resolve-PendingDestinationObservations {
+    param([object[]]$Requests)
+    $results = @{}
+    $directories = @{}
+    foreach ($request in $Requests) {
+        $directory = [System.IO.Path]::GetDirectoryName([string]$request.Destination)
+        if (-not $directories.ContainsKey($directory)) { $directories[$directory] = [System.Collections.Generic.List[object]]::new() }
+        $directories[$directory].Add($request)
+    }
+    if ($null -ne $script:PendingPerformance) { Add-PendingMetric "RequestedDirectories" 0 $directories.Count }
+    foreach ($directory in $directories.Keys) {
+        $group = $directories[$directory]
+        $paths = @{}
+        $wanted = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($request in $group) {
+            $paths[$request.Destination] = $request
+            [void]$wanted.Add([System.IO.Path]::GetFileName($request.Destination))
+        }
+        if ($null -ne $script:PendingPerformance) {
+            $sizeBucket = if ($paths.Count -lt 8) { 'SparseDirectory' } else { 'DenseDirectory' }
+            Add-PendingMetric $sizeBucket
+            Add-PendingMetric 'DistinctDestinationPaths' 0 $paths.Count
+        }
+        $listing = $null
+        if ($paths.Count -ge 8) {
+            $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+            $listing = Get-PendingDirectoryNames -Directory $directory -Limit ([math]::Max(1024, 4 * $paths.Count)) -Wanted $wanted
+            if ($null -ne $script:PendingPerformance) {
+                Add-PendingDiscoveryAttribution -Requests @($group.ToArray()) -ElapsedMs (([Diagnostics.Stopwatch]::GetTimestamp() - $started) * 1000.0 / [Diagnostics.Stopwatch]::Frequency)
+            }
+        }
+        $pathResults = @{}
+        $missingParent = $false
+        $parentChecked = $false
+        $negativePaths = [System.Collections.Generic.List[string]]::new()
+        foreach ($destination in $paths.Keys) {
+            $request = $paths[$destination]
+            $name = [System.IO.Path]::GetFileName($destination)
+            $state = "Error"; $method = "Exact"; $errorText = ""
+            if ($null -ne $listing -and $listing.Found.Contains($name)) {
+                $state = "Exists"; $method = "Enumeration"
+            } elseif ($missingParent) {
+                $state = "Missing"; $method = "MissingParent"
+            } else {
+                if ($null -ne $listing -and $null -ne $script:PendingPerformance) { Add-PendingMetric "EnumerationFallback" }
+                $probe = Invoke-PendingPathProbe $destination "DestinationProbe" $request.PairName $request.Operation
+                $state = [string]$probe.State; $errorText = [string]$probe.ErrorMessage
+                if ($state -eq "Missing" -and -not $parentChecked -and $paths.Count -gt 1) {
+                    $parentChecked = $true
+                    $parent = Invoke-PendingPathProbe $directory "DestinationParentProbe" $request.PairName $request.Operation
+                    $missingParent = ([string]$parent.State -eq "Missing")
+                }
+            }
+            if ($state -eq "Missing") { $negativePaths.Add($destination) }
+            $pathResults[$destination] = [pscustomobject]@{ State=$state; Method=$method; ErrorMessage=$errorText; CheckedUtc=[datetime]::UtcNow.ToString("o") }
+        }
+        # A failed/disconnected share can look like a missing path. Confirm its root AFTER negative probes.
+        if ($negativePaths.Count -gt 0) {
+            $first = $paths[$negativePaths[0]]
+            $root = Invoke-PendingPathProbe $first.Root "DestinationRootConfirmation" $first.PairName $first.Operation
+            if ($root.State -ne "Exists" -or -not $root.IsDirectory) {
+                foreach ($destination in $negativePaths) {
+                    $pathResults[$destination].State = "Error"
+                    $pathResults[$destination].ErrorMessage = "Destination root unavailable"
+                }
+            }
+        }
+        foreach ($request in $group) {
+            $result = $pathResults[$request.Destination]
+            $results[$request.Key] = [pscustomobject]@{
+                Id=$request.Id; Action=$request.Action; Destination=$request.Destination
+                State=$result.State; Method=$result.Method; ErrorMessage=$result.ErrorMessage; CheckedUtc=$result.CheckedUtc
+            }
+            if ($null -ne $script:PendingPerformance) {
+                Add-PendingMetric ("Observed" + $result.State) 0 1 $request.PairName $request.Operation
+                Add-PendingMetric ("ResolvedBy" + $result.Method) 0 1 $request.PairName $request.Operation
+            }
+        }
+    }
+    return $results
+}
+
+function Get-PendingDestinationState {
+    param([hashtable]$PreviousRootOnline = $null, [hashtable]$PairIndex = $null)
+    if ($null -eq $PairIndex) { $PairIndex = Get-PendingPairIndex }
+    $rootOnline = @{}; $pairOnline = @{}; $pairRoots = @{}; $becameOnline = @{}; $changedRoots = @{}
+    $offlineRoots = [System.Collections.Generic.List[string]]::new()
+    foreach ($pairKey in $PairIndex.Keys) {
+        $root = [string]$PairIndex[$pairKey].Root
+        $rootKey = $root.ToLowerInvariant()
+        $pairRoots[$pairKey] = $rootKey
+        if ([string]::IsNullOrWhiteSpace($rootKey)) { $pairOnline[$pairKey] = $false; continue }
+        if (-not $rootOnline.ContainsKey($rootKey)) {
+            $probe = Invoke-PendingPathProbe $root "RootProbe"
+            $online = ($probe.State -eq "Exists" -and $probe.IsDirectory)
+            $rootOnline[$rootKey] = $online
+            if (-not $online) { $offlineRoots.Add($root.TrimEnd('\')) }
+            $wasOnline = ($null -ne $PreviousRootOnline -and $PreviousRootOnline.ContainsKey($rootKey) -and [bool]$PreviousRootOnline[$rootKey])
+            $becameOnline[$rootKey] = (-not $wasOnline -and $online)
+            $changedRoots[$rootKey] = ($wasOnline -ne $online)
+        }
+        $pairOnline[$pairKey] = [bool]$rootOnline[$rootKey]
+    }
+    return [pscustomobject]@{
+        RootOnline=$rootOnline; PairOnline=$pairOnline; PairRoots=$pairRoots; PairIndex=$PairIndex
+        BecameOnline=$becameOnline; ChangedRoots=$changedRoots
+        DriveStatus=[pscustomobject]@{ Online=($offlineRoots.Count -eq 0); OfflineDrives=@($offlineRoots.ToArray()) }
+    }
+}
+
+function Save-PendingClassifications {
+    param([object[]]$Classifications, [switch]$PassThru)
+    if ($Classifications.Count -eq 0 -and -not $PassThru) { return $false }
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) {
+        if ($PassThru) { throw "Pending classification timed out waiting for queue lock" }
+        Write-Log "WARN" "Pending classification timed out waiting for queue lock"
+        return $false
+    }
+    try {
+        $dict = Get-QueueDictionary @(Read-QueueEntriesUnlocked)
+        $changed = $false
+        foreach ($wanted in $Classifications) {
+            $key = [string]$wanted.Key
+            if (-not $dict.ContainsKey($key)) { continue }
+            $current = $dict[$key]
+            if ([string]$current.Id -ne [string]$wanted.Id -or $current.Action -ne "Upsert") { continue }
+            if ([string]$current.BaselineState -eq [string]$wanted.BaselineState -and [string]$current.Operation -eq [string]$wanted.Operation) { continue }
+            $current.BaselineState = [string]$wanted.BaselineState
+            $current.Operation = [string]$wanted.Operation
+            $changed = $true
+        }
+        $currentEntries = @($dict.Values)
+        if ($changed) {
+            $written = Write-QueueEntriesUnlocked $currentEntries -PassThru
+            if (-not $written.Success) { if ($PassThru) { throw "Pending classifications could not be saved" }; return $false }
+            $currentEntries = @($written.Entries)
+        }
+        if ($PassThru) {
+            # Entries and fingerprint are captured under the SAME mutex; callers need no third read.
+            return [pscustomobject]@{ Changed=$changed; Entries=$currentEntries; QueueFingerprint=(Get-QueueFileFingerprint) }
+        }
+        return $changed
+    } finally { Exit-QueueMutex $mutex }
+}
+
+
+
+function Get-ExactPathProbe {
+    param([string]$Path)
+    try {
+        $attributes = [System.IO.File]::GetAttributes($Path)
+        $isDirectory = (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0)
+        $item = if ($isDirectory) {
+            [System.IO.DirectoryInfo]::new($Path)
+        } else {
+            [System.IO.FileInfo]::new($Path)
+        }
+        if ($null -eq $item) {
+            return [pscustomobject]@{ State="Error"; Item=$null; IsDirectory=$null; ErrorMessage="EMPTY_PATH_RESULT" }
+        }
+        return [pscustomobject]@{ State="Exists"; Item=$item; IsDirectory=[bool]$isDirectory; ErrorMessage="" }
+    } catch [System.IO.FileNotFoundException] {
+        return [pscustomobject]@{ State="Missing"; Item=$null; IsDirectory=$null; ErrorMessage="" }
+    } catch [System.IO.DirectoryNotFoundException] {
+        return [pscustomobject]@{ State="Missing"; Item=$null; IsDirectory=$null; ErrorMessage="" }
+    } catch [System.IO.DriveNotFoundException] {
+        return [pscustomobject]@{ State="Missing"; Item=$null; IsDirectory=$null; ErrorMessage="" }
+    } catch {
+        return [pscustomobject]@{ State="Error"; Item=$null; IsDirectory=$null; ErrorMessage=(Format-ErrorSummary $_.Exception.Message) }
+    }
+}
+
+function Sync-PendingDeleteEntries {
+    param(
+        [object[]]$Entries,
+        [object]$DestinationState,
+        [switch]$ReadOnly
+    )
+    $decisions = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in @($Entries)) {
+        if ([string]$entry.Action -ne "Delete") { continue }
+        $pairKey = ([string]$entry.PairName).ToUpperInvariant()
+        $online = ($DestinationState.PairOnline.ContainsKey($pairKey) -and [bool]$DestinationState.PairOnline[$pairKey])
+        if (-not $online) { continue }
+        $context = $DestinationState.PairIndex[$pairKey]
+        if ($null -eq $context) { continue }
+        $pair = $context.Pair
+        try { $paths=Get-SafeEntryPaths $pair $entry } catch { continue }
+        $source=$paths.Source; $dest=$paths.Destination
+        $sourceProbe = Invoke-PendingPathProbe $source "SourceProbe" $entry.PairName "Delete"
+        if ([string]$sourceProbe.State -eq "Error") { continue }
+        if ($sourceProbe.State -eq "Missing") {
+            $sourceRootProbe = Invoke-PendingPathProbe $context.Source "SourceRootConfirmation" $entry.PairName "Delete"
+            if ($sourceRootProbe.State -ne "Exists" -or -not $sourceRootProbe.IsDirectory) { continue }
+        }
+        $destProbe = Invoke-PendingPathProbe $dest "DestinationProbe" $entry.PairName "Delete"
+        if ([string]$destProbe.State -eq "Error") { continue }
+        if ($destProbe.State -eq "Missing") {
+            $rootProbe = Invoke-PendingPathProbe $context.Root "DestinationRootConfirmation" $entry.PairName "Delete"
+            if ($rootProbe.State -ne "Exists" -or -not $rootProbe.IsDirectory) { continue }
+        }
+        if ([string]$sourceProbe.State -eq "Exists") {
+            $sourceItem = $sourceProbe.Item
+            if ($null -eq $sourceItem) {
+                Write-Log "WARN" ("Pending source probe returned no item; keeping entry queued: " + $source)
+                continue
+            }
+            $isDirectory = [bool]$sourceProbe.IsDirectory
+            $size = $(if ($isDirectory) { $null } else { [int64]$sourceItem.Length })
+            $lastWrite = $(if ($isDirectory) { $null } else { $sourceItem.LastWriteTimeUtc.ToString("o") })
+            $decisions.Add([pscustomobject]@{
+                Kind = "Convert"
+                Key = Get-QueueEntryKey $entry
+                Id = [string]$entry.Id
+                Source = $source
+                Dest = $dest
+                IsDirectory = $isDirectory
+                Size = $size
+                LastWriteTimeUtc = $lastWrite
+                BaselineState = $(if ([string]$destProbe.State -eq "Exists") { "Present" } else { "Absent" })
+                Operation = $(if ([string]$destProbe.State -eq "Exists") { "Update" } else { "Add" })
+            }) | Out-Null
+        } elseif ([string]$destProbe.State -eq "Missing") {
+            $decisions.Add([pscustomobject]@{
+                Kind = "Prune"
+                Key = Get-QueueEntryKey $entry
+                Id = [string]$entry.Id
+            }) | Out-Null
+        }
+    }
+    if ($decisions.Count -eq 0) {
+        return [pscustomobject]@{ Changed=$false; Pruned=0; Converted=0; DirectoryEntries=@() }
+    }
+
+    $mutex = if ($ReadOnly) { $null } else { Enter-QueueMutex }
+    if (-not $ReadOnly -and $null -eq $mutex) {
+        Write-Log "WARN" "Pending delete reconciliation timed out waiting for queue lock"
+        return [pscustomobject]@{ Changed=$false; Pruned=0; Converted=0; DirectoryEntries=@() }
+    }
+    try {
+        $dict = if ($ReadOnly) { Get-QueueDictionary $Entries } else { Get-QueueDictionary @(Read-QueueEntriesUnlocked) }
+        $pruned = 0
+        $converted = 0
+        $directoryEntries = New-Object System.Collections.Generic.List[object]
+        foreach ($decision in @($decisions.ToArray())) {
+            $key = [string]$decision.Key
+            if (-not $dict.ContainsKey($key)) { continue }
+            $current = $dict[$key]
+            if ([string]$current.Id -ne [string]$decision.Id -or [string]$current.Action -ne "Delete") { continue }
+            if ([string]$decision.Kind -eq "Prune") {
+                $dict.Remove($key)
+                $pruned++
+                continue
+            }
+            $current.Action = "Upsert"
+            $current.Operation = [string]$decision.Operation
+            $current.EventKind = "Changed"
+            $current.BaselineState = [string]$decision.BaselineState
+            $current.TimeUtc = (Get-Date).ToUniversalTime().ToString("o")
+            $current.Source = [string]$decision.Source
+            $current.Dest = [string]$decision.Dest
+            $current.IsDirectory = [bool]$decision.IsDirectory
+            $current.Size = $decision.Size
+            $current.LastWriteTimeUtc = $decision.LastWriteTimeUtc
+            $dict[$key] = $current
+            if ([bool]$current.IsDirectory) { $directoryEntries.Add($current) | Out-Null }
+            $converted++
+        }
+        if (($pruned + $converted) -eq 0) {
+            return [pscustomobject]@{ Changed=$false; Pruned=0; Converted=0; DirectoryEntries=@() }
+        }
+        if ($ReadOnly) {
+            foreach ($directoryEntry in $directoryEntries) {
+                $pair = Find-PairByName $directoryEntry.PairName
+                foreach ($item in @(Get-SafeTreeItems $directoryEntry.Source $pair)) {
+                    $child = New-QueueEntry $pair $item.FullName 'Upsert' $item.PSIsContainer -EventKind Snapshot
+                    Merge-QueueEntryState $dict $child
+                }
+            }
+            return [pscustomobject]@{Changed=$true;Pruned=$pruned;Converted=$converted;DirectoryEntries=@();Entries=@($dict.Values)}
+        }
+        if (-not (Write-QueueEntriesUnlocked @($dict.Values))) {
+            return [pscustomobject]@{ Changed=$false; Pruned=0; Converted=0; DirectoryEntries=@() }
+        }
+        return [pscustomobject]@{ Changed=$true; Pruned=$pruned; Converted=$converted; DirectoryEntries=@($directoryEntries.ToArray()) }
+    } finally {
+        Exit-QueueMutex $mutex
+    }
+}
+
+function Queue-ReconciledDirectorySnapshot {
+    param([object]$Entry)
+    $current = $null
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) {
+        Write-Log "WARN" "Directory reconciliation timed out waiting for queue lock"
+        return
+    }
+    try {
+        $dict = Get-QueueDictionary @(Read-QueueEntriesUnlocked)
+        $key = Get-QueueEntryKey $Entry
+        if ($dict.ContainsKey($key) -and [string]$dict[$key].Id -eq [string]$Entry.Id -and [string]$dict[$key].Action -eq "Upsert") {
+            $current = $dict[$key]
+        }
+    } finally {
+        Exit-QueueMutex $mutex
+    }
+    if ($null -eq $current) { return }
+    $sourceProbe = Get-ExactPathProbe ([string]$current.Source)
+    if ([string]$sourceProbe.State -ne "Exists" -or $null -eq $sourceProbe.Item -or -not [bool]$sourceProbe.IsDirectory) { return }
+    Queue-DirectorySnapshot -Entry $current -SkipRootMerge -ExpectedRootId ([string]$current.Id)
+}
+
+function Sync-PendingSessionSnapshot {
+    param([switch]$RefreshDestinations, [switch]$ShowProgress, [switch]$ReadOnly)
+    if ($ShowProgress) { Write-Host -NoNewline "Checking pending destinations..." -ForegroundColor Yellow }
+    $scanStarted = [Diagnostics.Stopwatch]::GetTimestamp()
+    $script:PendingScanActive = $true
+    $script:PendingPerformance = if ($script:TracePendingPerformance) {
+        [pscustomobject]@{
+            StartedUtc=[datetime]::UtcNow.ToString("o"); Runtime=$PSVersionTable.PSVersion.ToString()
+            TotalMs=0.0; Outcome="Error"; Entries=0; QueueBytes=0; Counts=@{}; Milliseconds=@{}; ByPair=@{}; ByOperation=@{}
+        }
+    } else { $null }
+    try {
+        $previous = $script:PendingSessionSnapshot
+        $fingerprintBefore = Get-QueueFileFingerprint
+        $queueChanged = ($null -eq $previous -or [string]$previous.QueueFingerprint -ne $fingerprintBefore)
+        $pairIndex = Get-PendingPairIndex
+        $contextIdentity = [string][bool]$ReadOnly + "|" + (@($pairIndex.Keys | Sort-Object | ForEach-Object {
+            $_ + "|" + $pairIndex[$_].Source + "|" + $pairIndex[$_].Destination
+        }) -join "`n")
+        if ($null -ne $previous -and $previous.ContextIdentity -ne $contextIdentity) { $previous = $null; $queueChanged = $true }
+        $previousHasDeletes = ($null -ne $previous -and [int]$previous.Counts.DeleteCount -gt 0)
+        $previousRoots = if ($null -ne $previous) { $previous.RootOnline } else { $null }
+        if ($RefreshDestinations -or $null -eq $previous -or $previousHasDeletes -or $previous.NeedsRefresh) {
+            $destinationState = Get-PendingDestinationState -PreviousRootOnline $previousRoots -PairIndex $pairIndex
+        } else {
+            $destinationState = [pscustomobject]@{
+                RootOnline=$previous.RootOnline; PairOnline=$previous.PairOnline; PairRoots=$previous.PairRoots
+                PairIndex=$pairIndex; BecameOnline=@{}; ChangedRoots=@{}; DriveStatus=$previous.DriveStatus
+            }
+        }
+        $rootsChanged = $false
+        foreach ($value in $destinationState.ChangedRoots.Values) { if ($value) { $rootsChanged = $true; break } }
+        if (-not $queueChanged -and $null -ne $previous -and -not $previousHasDeletes -and -not $rootsChanged -and -not $previous.NeedsRefresh) {
+            $previous.RootOnline=$destinationState.RootOnline; $previous.PairOnline=$destinationState.PairOnline
+            $previous.PairRoots=$destinationState.PairRoots; $previous.DriveStatus=$destinationState.DriveStatus
+            if ($null -ne $script:PendingPerformance) {
+                $script:PendingPerformance.Outcome="Snapshot"; $script:PendingPerformance.Entries=$previous.Entries.Count
+                foreach ($entry in $previous.Entries) { Add-PendingMetric "SnapshotReuse" 0 1 $entry.PairName $entry.Operation }
+            }
+            return $previous
+        }
+        $entries = @(Remove-OrphanedUpserts @(Get-LatestQueueEntries @(Read-QueueEntries)))
+        if ($null -ne $script:PendingPerformance) {
+            foreach ($entry in $entries) { Add-PendingMetric 'QueuedEntries' 0 1 $entry.PairName $entry.Operation }
+        }
+        $deleteStarted = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+        $deleteSync = Sync-PendingDeleteEntries -Entries $entries -DestinationState $destinationState -ReadOnly:$ReadOnly
+        if ($null -ne $script:PendingPerformance) {
+            Add-PendingMetric "DeleteReconciliation" $deleteStarted
+            Add-PendingMetric "DeletesPruned" 0 $deleteSync.Pruned
+            Add-PendingMetric "DeletesConverted" 0 $deleteSync.Converted
+        }
+        if ($deleteSync.Changed -and $ReadOnly) { $entries = @($deleteSync.Entries) }
+        if ($deleteSync.Changed -and -not $ReadOnly) {
+            Write-Log "QUEUE" ("Pending deletes reconciled: pruned={0} converted={1}" -f $deleteSync.Pruned, $deleteSync.Converted)
+            foreach ($directoryEntry in $deleteSync.DirectoryEntries) {
+                $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+                Queue-ReconciledDirectorySnapshot $directoryEntry
+                if ($null -ne $script:PendingPerformance) { Add-PendingMetric "RestoredDirectorySnapshot" $started 1 $directoryEntry.PairName "Delete" }
+            }
+            $entries = @(Remove-OrphanedUpserts @(Get-LatestQueueEntries @(Read-QueueEntries)))
+        }
+        $requests = [System.Collections.Generic.List[object]]::new()
+        $observations = @{}
+        $needsRefresh = $false
+        foreach ($entry in $entries) {
+            if ($entry.Action -eq "Delete") { $entry.Operation="Delete"; continue }
+            $key = Get-QueueEntryKey $entry
+            $pairKey = ([string]$entry.PairName).ToUpperInvariant()
+            if (-not $pairIndex.ContainsKey($pairKey)) { continue }
+            $context = $pairIndex[$pairKey]
+            $destination = [System.IO.Path]::Combine($context.Destination, [string]$entry.RelPath)
+            $online = [bool]$destinationState.PairOnline[$pairKey]
+            if (-not $online) {
+                # Queue event history is not proof of absence. Keep it unchanged and do not persist a guess.
+                $observations[$key] = [pscustomobject]@{ Id=$entry.Id; Action=$entry.Action; Destination=$destination; State="Error"; Method="Offline"; ErrorMessage="Destination root unavailable"; CheckedUtc=[datetime]::UtcNow.ToString("o") }
+                if ($null -ne $script:PendingPerformance) { Add-PendingMetric "OfflineEntries" 0 1 $entry.PairName $entry.Operation }
+                continue
+            }
+            $old = if ($null -ne $previous -and $null -ne $previous.Observations -and $previous.Observations.ContainsKey($key)) { $previous.Observations[$key] } else { $null }
+            $rootKey = [string]$destinationState.PairRoots[$pairKey]
+            if ($null -ne $old -and $old.Id -eq $entry.Id -and $old.Action -eq $entry.Action -and $old.Destination -eq $destination -and $old.State -ne "Error" -and -not $destinationState.ChangedRoots[$rootKey]) {
+                $observations[$key] = $old
+                if ($null -ne $script:PendingPerformance) { Add-PendingMetric "SnapshotReuse" 0 1 $entry.PairName $entry.Operation }
+                continue
+            }
+            $requests.Add([pscustomobject]@{ Key=$key; Id=$entry.Id; Action=$entry.Action; PairName=$entry.PairName; Operation=$entry.Operation; Destination=$destination; Root=$context.Root })
+        }
+        $resolved = Resolve-PendingDestinationObservations -Requests @($requests.ToArray())
+        foreach ($key in $resolved.Keys) { $observations[$key] = $resolved[$key] }
+        $classifications = [System.Collections.Generic.List[object]]::new()
+        foreach ($entry in $entries) {
+            if ($entry.Action -eq "Delete") { continue }
+            $key = Get-QueueEntryKey $entry
+            if (-not $observations.ContainsKey($key)) { continue }
+            $observation = $observations[$key]
+            if ($observation.State -eq "Error") { if ($observation.Method -ne "Offline") { $needsRefresh=$true }; continue }
+            $baseline = if ($observation.State -eq "Exists") { "Present" } else { "Absent" }
+            $operation = if ($observation.State -eq "Exists") { "Update" } else { "Add" }
+            if ($entry.BaselineState -ne $baseline -or $entry.Operation -ne $operation) {
+                $classifications.Add([pscustomobject]@{ Key=$key; Id=$entry.Id; BaselineState=$baseline; Operation=$operation })
+            }
+            $entry.BaselineState=$baseline; $entry.Operation=$operation
+        }
+        $commit = if ($ReadOnly) {
+            [pscustomobject]@{ Entries=$entries; QueueFingerprint=$fingerprintBefore }
+        } else { Save-PendingClassifications -Classifications @($classifications.ToArray()) -PassThru }
+        $currentEntries = @(Remove-OrphanedUpserts $commit.Entries)
+        $currentByKey = @{}
+        foreach ($entry in $currentEntries) { $currentByKey[(Get-QueueEntryKey $entry)]=$entry }
+        $stale = ($entries.Count -ne $currentEntries.Count)
+        foreach ($entry in $entries) {
+            $key = Get-QueueEntryKey $entry
+            $current = $currentByKey[$key]
+            if ($null -eq $current -or $entry.Id -ne $current.Id -or $entry.Action -ne $current.Action -or $entry.BaselineState -ne $current.BaselineState) { $stale=$true; break }
+        }
+        $fingerprintAfter = [string]$commit.QueueFingerprint
+        if ($stale) { $fingerprintAfter="STALE|"+$fingerprintAfter }
+        $counts = [pscustomobject]@{ EffectiveCount=$entries.Count; AddCount=0; UpdateCount=0; DeleteCount=0 }
+        foreach ($entry in $entries) {
+            switch ($entry.Operation) { "Add" { $counts.AddCount++ }; "Update" { $counts.UpdateCount++ }; "Delete" { $counts.DeleteCount++ } }
+        }
+        $snapshot = [pscustomobject]@{
+            QueueFingerprint=$fingerprintAfter; ContextIdentity=$contextIdentity; Entries=$entries; Observations=$observations
+            PairOnline=$destinationState.PairOnline; PairRoots=$destinationState.PairRoots; RootOnline=$destinationState.RootOnline
+            DriveStatus=$destinationState.DriveStatus; Counts=$counts; NeedsRefresh=$needsRefresh; PreparedUtc=[datetime]::UtcNow.ToString("o")
+        }
+        $script:PendingSessionSnapshot=$snapshot
+        if ($null -ne $script:PendingPerformance) { $script:PendingPerformance.Entries=$entries.Count; $script:PendingPerformance.Outcome=if($stale){"Stale"}else{"Prepared"} }
+        return $snapshot
+    } finally {
+        $script:PendingScanActive=$false
+        if ($null -ne $script:PendingPerformance) {
+            $script:PendingPerformance.TotalMs=([Diagnostics.Stopwatch]::GetTimestamp()-$scanStarted)*1000.0/[Diagnostics.Stopwatch]::Frequency
+            try { $script:PendingPerformance.QueueBytes=([System.IO.FileInfo]::new($script:QueuePath)).Length } catch {}
+            $script:LastPendingPerformance=$script:PendingPerformance
+            try { if (-not $ReadOnly) { Write-Log "PERF" ("Pending scan " + ($script:PendingPerformance | ConvertTo-Json -Depth 8 -Compress)) } } catch {}
+            $script:PendingPerformance=$null
+        }
+        if ($ShowProgress) { Write-Host -NoNewline ("`r" + (" " * 40) + "`r") }
+    }
+}
+
+function Write-QueueEntriesUnlocked {
+    param([object[]]$Entries, [switch]$PassThru)
+    $started = if ($null -ne $script:PendingPerformance) { [Diagnostics.Stopwatch]::GetTimestamp() } else { 0 }
+    $effective = @(Get-LatestQueueEntries $Entries)
+    $tmp = "$script:QueuePath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+    $replaceBackup = "$script:QueuePath.$PID.replace.bak"
+    $writer = $null
+    try {
+        $writer = New-Object System.IO.StreamWriter($tmp, $false, (New-Object System.Text.UTF8Encoding($false)))
+        foreach ($entry in $effective) { $writer.WriteLine(($entry | ConvertTo-Json -Depth 10 -Compress)) }
+        $writer.Dispose(); $writer = $null
+        if (Test-Path -LiteralPath $script:QueuePath) { [System.IO.File]::Replace($tmp, $script:QueuePath, $replaceBackup) }
+        else { Move-Item -LiteralPath $tmp -Destination $script:QueuePath -Force -ErrorAction Stop }
+        try { Write-QueueMetaUnlocked $effective } catch { Write-Log "WARN" "Queue committed; metadata will be rebuilt: $($_.Exception.Message)" }
+        if ($PassThru) { return [pscustomobject]@{ Success=$true; Entries=$effective } }
         return $true
-    })
+    } catch {
+        Write-Log "ERROR" "Rewrite queue failed: $($_.Exception.Message)"
+        if ($PassThru) { return [pscustomobject]@{ Success=$false; Entries=@() } }
+        return $false
+    } finally {
+        if ($null -ne $script:PendingPerformance) { Add-PendingMetric "QueueSave" $started }
+        if ($null -ne $writer) { try { $writer.Dispose() } catch {} }
+        if (Test-Path -LiteralPath $tmp) { Remove-OwnedPath ([IO.Path]::GetDirectoryName($tmp)) $tmp }
+        if (Test-Path -LiteralPath $replaceBackup) { Remove-OwnedPath $script:DataDir $replaceBackup }
+    }
 }
 
 function Write-QueueEntries {
     param([object[]]$Entries)
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) { Write-Log "ERROR" "Queue write timed out waiting for lock"; return $false }
+    try { return (Write-QueueEntriesUnlocked $Entries) } finally { Exit-QueueMutex $mutex }
+}
+
+function Test-QueueMetaFresh {
+    if (-not (Test-Path -LiteralPath $script:QueueMetaPath) -or -not (Test-Path -LiteralPath $script:QueuePath)) { return $false }
     try {
-        $tmp = "$script:QueuePath.tmp"
-        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
-        New-Item -ItemType File -Path $tmp -Force | Out-Null
-        foreach ($e in $Entries) {
-            Add-Content -LiteralPath $tmp -Value ($e | ConvertTo-Json -Depth 10 -Compress) -Encoding UTF8
+        $meta = Get-Content -LiteralPath $script:QueueMetaPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+        $queueItem = Get-Item -LiteralPath $script:QueuePath -Force -ErrorAction Stop
+        return ([int]$meta.SchemaVersion -eq 2 -and [int64]$meta.QueueLength -eq [int64]$queueItem.Length -and [int64]$meta.QueueWriteTicks -eq [int64]$queueItem.LastWriteTimeUtc.Ticks)
+    } catch { return $false }
+}
+
+function Initialize-QueueStorage {
+    if (Test-QueueMetaFresh) { return }
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) { throw "Queue initialization timed out waiting for lock" }
+    try {
+        if (Test-QueueMetaFresh) { return }
+        $entries = @(Read-QueueEntriesUnlocked)
+        $rawCount = $entries.Count
+        if (Write-QueueEntriesUnlocked $entries) {
+            $effectiveCount = @(Read-QueueEntriesUnlocked).Count
+            Write-Log "QUEUE" "Queue v2 initialized: raw=$rawCount effective=$effectiveCount"
         }
-        Move-Item -LiteralPath $tmp -Destination $script:QueuePath -Force -ErrorAction Stop
-    } catch {
-        Write-Log "ERROR" "Rewrite queue failed: $($_.Exception.Message)"
-    }
+    } finally { Exit-QueueMutex $mutex }
+}
+
+function Merge-QueueEntriesToDisk {
+    param([object[]]$Entries)
+    if (@($Entries).Count -eq 0) { return $true }
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) { Write-Log "WARN" "Queue merge timed out waiting for lock"; return $false }
+    try {
+        $pathIndex = @{}
+        $dict = Get-QueueDictionary @(Read-QueueEntriesUnlocked) -PathIndex $pathIndex
+        foreach ($entry in @($Entries)) { Merge-QueueEntryState -Dictionary $dict -Incoming $entry -PathIndex $pathIndex }
+        return (Write-QueueEntriesUnlocked @($dict.Values))
+    } finally { Exit-QueueMutex $mutex }
+}
+
+function Remove-AppliedQueueEntries {
+    param([object[]]$AttemptedEntries, [string[]]$SuccessfulKeys)
+    $success = @{}
+    foreach ($key in @($SuccessfulKeys)) { $success[[string]$key] = $true }
+    $attemptedByKey = @{}
+    foreach ($entry in @($AttemptedEntries)) { $attemptedByKey[(Get-QueueEntryKey $entry)] = $entry }
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) { Write-Log "ERROR" "Queue apply cleanup timed out waiting for lock"; return $false }
+    try {
+        $dict = Get-QueueDictionary @(Read-QueueEntriesUnlocked)
+        foreach ($key in @($success.Keys)) {
+            if (-not $dict.ContainsKey($key) -or -not $attemptedByKey.ContainsKey($key)) { continue }
+            if ([string]$dict[$key].Id -eq [string]$attemptedByKey[$key].Id) { $dict.Remove($key) }
+        }
+        return (Write-QueueEntriesUnlocked @($dict.Values))
+    } finally { Exit-QueueMutex $mutex }
 }
 
 function Clear-PendingQueue {
@@ -1122,38 +2338,54 @@ function Clear-PendingQueue {
     Write-Host ""
     if (-not (Read-EnterOrEsc "Press Enter to clear pending queue, or Esc to cancel.")) { return }
     Request-ClearPendingQueue
-    Write-Color "Pending queue cleared from disk and watcher memory." "Green"
+    Write-Color "Saved queue cleared. Watcher will acknowledge the cutoff; newer events are retained." "Green"
     Wait-Back
 }
 
 function Request-ClearPendingQueue {
+    $cutoff=[datetime]::UtcNow
+    $script:PendingSessionSnapshot=$null
+    $mutex=Enter-QueueMutex
+    if ($null -eq $mutex) { throw 'Clear queue lock timed out; queue preserved' }
     try {
-        Set-Content -LiteralPath $script:ClearQueueRequestPath -Value (Get-Date).ToString("s") -Encoding UTF8
-    } catch {}
-    try {
-        $script:Pending.Clear()
-    } catch {}
-    Write-QueueEntries @()
-
-    $deadline = (Get-Date).AddSeconds(5)
-    do {
-        Start-Sleep -Milliseconds 250
-        Write-QueueEntries @()
-        $entries = @(Read-QueueEntries)
-        if ($entries.Count -eq 0) { break }
-    } while ((Get-Date) -lt $deadline)
+        $entries=@(Read-QueueEntriesUnlocked)
+        $keep=@($entries | Where-Object { ([datetimeoffset]::Parse((ConvertTo-UtcTimestamp $_.TimeUtc))).UtcDateTime -gt $cutoff })
+        if (-not (Write-QueueEntriesUnlocked $keep)) { throw 'Clear queue failed' }
+        Write-AtomicText $script:ClearQueueRequestPath $cutoff.ToString('o')
+    } finally { Exit-QueueMutex $mutex }
+    foreach ($key in @($script:Pending.Keys)) {
+        if (([datetimeoffset]::Parse((ConvertTo-UtcTimestamp $script:Pending[$key].Entry.TimeUtc))).UtcDateTime -le $cutoff) { $script:Pending.Remove($key) }
+    }
 }
 
 function Add-PendingEvent {
     param([object]$Entry)
     if ($null -eq $Entry) { return }
     $key = Get-QueueEntryKey $Entry
-    $script:Pending[$key] = [pscustomobject]@{ Entry = $Entry; Due = (Get-Date).AddMilliseconds([int]$script:Config.DebounceMs) }
+    $dict = @{}
+    if ($script:Pending.ContainsKey($key)) { $dict[$key] = $script:Pending[$key].Entry }
+    Merge-QueueEntryState -Dictionary $dict -Incoming $Entry
+    if ($dict.ContainsKey($key)) {
+        $script:Pending[$key] = [pscustomobject]@{ Entry = $dict[$key]; Due = (Get-Date).AddMilliseconds([int]$script:Config.DebounceMs) }
+    } else {
+        $script:Pending.Remove($key)
+        if ([string]$Entry.Action -eq "Delete") {
+            $cancel = ConvertTo-QueueV2Entry $Entry
+            $cancel.BaselineState = "Absent"
+            $cancel.Operation = "Delete"
+            $script:Pending[$key] = [pscustomobject]@{ Entry = $cancel; Due = (Get-Date).AddMilliseconds([int]$script:Config.DebounceMs) }
+        }
+    }
 }
 
 function Normalize-QueueRelPath {
     param([string]$RelPath)
-    return (([string]$RelPath) -replace '/', '\').Trim('\')
+    $rel = ([string]$RelPath).Replace('/','\')
+    if ([string]::IsNullOrWhiteSpace($rel) -or [IO.Path]::IsPathRooted($rel) -or $rel -match '[:*?"<>|\x00-\x1f]') { throw 'Invalid relative queue path' }
+    foreach ($segment in $rel.Split('\')) {
+        if (-not $segment -or $segment -in @('.','..') -or $segment -match '[. ]$' -or $segment -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'Unsafe relative queue path segment' }
+    }
+    return $rel
 }
 
 function Get-QueueEntryKey {
@@ -1172,56 +2404,114 @@ function Test-QueueEntryChildOf {
     return $rel.StartsWith(($parentRel + "\"), [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-function Test-QueueEntryCoveredByAppliedDelete {
-    param([object]$Entry, [object[]]$AppliedDeletes)
-    foreach ($delete in @($AppliedDeletes)) {
-        if (Test-QueueEntryChildOf -Entry $Entry -Parent $delete) { return $true }
-    }
-    return $false
-}
+
 
 function Flush-PendingEvents {
     $now = Get-Date
+    $dueEntries = New-Object System.Collections.Generic.List[object]
+    $dueKeys = New-Object System.Collections.Generic.List[string]
     foreach ($key in @($script:Pending.Keys)) {
         $item = $script:Pending[$key]
         if ($item.Due -le $now) {
-            Append-QueueEntry $item.Entry
-            $script:Pending.Remove($key)
+            $dueEntries.Add($item.Entry) | Out-Null
+            $dueKeys.Add([string]$key) | Out-Null
         }
+    }
+    if ($dueEntries.Count -gt 0 -and (Merge-QueueEntriesToDisk @($dueEntries.ToArray()))) {
+        foreach ($key in $dueKeys) { $script:Pending.Remove($key) }
+        Write-Log "QUEUE" ("Committed {0} debounced decisions" -f $dueEntries.Count)
     }
 }
 
 function Process-ClearQueueRequest {
-    if (!(Test-Path -LiteralPath $script:ClearQueueRequestPath)) { return }
+    if (-not [IO.File]::Exists($script:ClearQueueRequestPath)) { return }
+    $mutex=Enter-QueueMutex
+    if ($null -eq $mutex) { return }
     try {
-        Remove-Item -LiteralPath $script:ClearQueueRequestPath -Force -ErrorAction SilentlyContinue
-    } catch {}
+        if (-not [IO.File]::Exists($script:ClearQueueRequestPath)) { return }
+        $cutoff=[datetime]::Parse([IO.File]::ReadAllText($script:ClearQueueRequestPath),[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind)
+        $keep=@(Read-QueueEntriesUnlocked | Where-Object { ([datetimeoffset]::Parse((ConvertTo-UtcTimestamp $_.TimeUtc))).UtcDateTime -gt $cutoff })
+        if (-not (Write-QueueEntriesUnlocked $keep)) { throw 'Watcher could not acknowledge clear request' }
+        foreach ($key in @($script:Pending.Keys)) {
+            if (([datetimeoffset]::Parse((ConvertTo-UtcTimestamp $script:Pending[$key].Entry.TimeUtc))).UtcDateTime -le $cutoff) { $script:Pending.Remove($key) }
+        }
+        Remove-OwnedPath $script:DataDir $script:ClearQueueRequestPath
+    } finally { Exit-QueueMutex $mutex }
+}
+
+function Merge-ReconciledDirectorySnapshotBatch {
+    param(
+        [object]$RootEntry,
+        [string]$ExpectedRootId,
+        [object[]]$Entries
+    )
+    $mutex = Enter-QueueMutex
+    if ($null -eq $mutex) {
+        Write-Log "WARN" "Directory snapshot batch timed out waiting for queue lock"
+        return [pscustomobject]@{ Success=$false; ParentChanged=$false }
+    }
     try {
-        $script:Pending.Clear()
-    } catch {}
-    Write-QueueEntries @()
-    Write-Log "INFO" "Pending queue cleared by request"
+        $pathIndex = @{}
+        $dict = Get-QueueDictionary @(Read-QueueEntriesUnlocked) -PathIndex $pathIndex
+        $rootKey = Get-QueueEntryKey $RootEntry
+        if (-not $dict.ContainsKey($rootKey) -or [string]$dict[$rootKey].Id -ne $ExpectedRootId -or [string]$dict[$rootKey].Action -ne "Upsert") {
+            return [pscustomobject]@{ Success=$false; ParentChanged=$true }
+        }
+        foreach ($entry in @($Entries)) { Merge-QueueEntryState -Dictionary $dict -Incoming $entry -PathIndex $pathIndex }
+        return [pscustomobject]@{ Success=[bool](Write-QueueEntriesUnlocked @($dict.Values)); ParentChanged=$false }
+    } finally {
+        Exit-QueueMutex $mutex
+    }
 }
 
 function Queue-DirectorySnapshot {
-    param([object]$Entry)
+    param([object]$Entry, [switch]$SkipRootMerge, [string]$ExpectedRootId = "")
     if (-not [bool]$Entry.IsDirectory) { return }
     $pair = Find-PairByName $Entry.PairName
     if ($null -eq $pair) { return }
     if (!(Test-Path -LiteralPath $Entry.Source -PathType Container)) { return }
+    if (-not $SkipRootMerge -and -not (Merge-QueueEntriesToDisk @($Entry))) { Write-Log "ERROR" "Could not commit directory root before snapshot"; return }
+    $script:Pending.Remove((Get-QueueEntryKey $Entry))
     $count = 0
+    $parentChanged = $false
+    $batch = New-Object System.Collections.Generic.List[object]
     try {
-        Get-ChildItem -LiteralPath $Entry.Source -Force -Recurse -ErrorAction SilentlyContinue |
+        Get-SafeTreeItems $Entry.Source $pair |
             Select-Object -First ([int]$script:Config.DirectoryScanMaxItems) |
             ForEach-Object {
                 if (Test-Excluded -Pair $pair -FullPath $_.FullName -IsDirectory $_.PSIsContainer) { return }
-                $qe = New-QueueEntry -Pair $pair -FullPath $_.FullName -Action "Upsert" -KnownIsDirectory ([bool]$_.PSIsContainer)
-                Append-QueueEntry $qe
+                $baseline = $(if ([string]$Entry.BaselineState -eq "Absent") { "Absent" } else { "Unknown" })
+                $qe = New-QueueEntry -Pair $pair -FullPath $_.FullName -Action "Upsert" -KnownIsDirectory ([bool]$_.PSIsContainer) -EventKind "Snapshot" -BaselineState $baseline
+                if ($null -ne $qe) { $batch.Add($qe) | Out-Null }
                 $count++
+                if ($batch.Count -ge 1000) {
+                    if ([string]::IsNullOrWhiteSpace($ExpectedRootId)) {
+                        if (-not (Merge-QueueEntriesToDisk @($batch.ToArray()))) { throw "Could not commit directory snapshot batch" }
+                    } else {
+                        $commit = Merge-ReconciledDirectorySnapshotBatch -RootEntry $Entry -ExpectedRootId $ExpectedRootId -Entries @($batch.ToArray())
+                        if ([bool]$commit.ParentChanged) { $parentChanged = $true; throw [System.OperationCanceledException]::new("Directory snapshot root event changed") }
+                        if (-not [bool]$commit.Success) { throw "Could not commit reconciled directory snapshot batch" }
+                    }
+                    $batch.Clear()
+                }
             }
+        if ($batch.Count -gt 0) {
+            if ([string]::IsNullOrWhiteSpace($ExpectedRootId)) {
+                if (-not (Merge-QueueEntriesToDisk @($batch.ToArray()))) { throw "Could not commit directory snapshot batch" }
+            } else {
+                $commit = Merge-ReconciledDirectorySnapshotBatch -RootEntry $Entry -ExpectedRootId $ExpectedRootId -Entries @($batch.ToArray())
+                if ([bool]$commit.ParentChanged) { Write-Log "SCAN" "Directory snapshot stopped because the root event changed: $($Entry.PairName) :: $($Entry.RelPath)"; return }
+                if (-not [bool]$commit.Success) { throw "Could not commit reconciled directory snapshot batch" }
+            }
+        }
+        if ($count -ge [int]$script:Config.DirectoryScanMaxItems) { Write-Log 'WARN' 'Directory child snapshot limit reached; root tree job is retained for complete transfer' }
         Write-Log "SCAN" "Queued directory snapshot for $($Entry.PairName) :: $($Entry.RelPath) :: $count items"
     } catch {
-        Write-Log "ERROR" "Directory snapshot failed: $($_.Exception.Message)"
+        if ($parentChanged) {
+            Write-Log "SCAN" "Directory snapshot stopped because the root event changed: $($Entry.PairName) :: $($Entry.RelPath)"
+        } else {
+            Write-Log "ERROR" "Directory snapshot failed: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -1234,14 +2524,22 @@ function Start-Watcher {
         return
     }
 
-    $mutexName = "Global\MiraQueue_" + ([Math]::Abs($script:ScriptPath.ToLowerInvariant().GetHashCode()))
+    $mutexName = $script:QueueMutexName.Replace("MiraQueueQueue_", "MiraQueueWatcher_")
     $script:Mutex = New-Object System.Threading.Mutex($false, $mutexName)
-    if (-not $script:Mutex.WaitOne(0, $false)) {
+    $watcherMutexAcquired = $false
+    try {
+        $watcherMutexAcquired = $script:Mutex.WaitOne(0, $false)
+    } catch [System.Threading.AbandonedMutexException] {
+        $watcherMutexAcquired = $true
+    }
+    if (-not $watcherMutexAcquired) {
+        $script:Mutex.Dispose(); $script:Mutex=$null
         Write-Color "Another watcher instance is already running." "Red"
         Wait-Back
         return
     }
 
+    if ([IO.File]::Exists($script:StopWatcherRequestPath)) { Remove-OwnedPath $script:DataDir $script:StopWatcherRequestPath }
     Write-Color "Watching configured sources. Changes are stored until you apply them." "DarkGray"
     Write-Color "Press Ctrl+C to stop." "DarkGray"
     Write-Host ""
@@ -1251,6 +2549,7 @@ function Start-Watcher {
     try {
         for ($i = 0; $i -lt $pairs.Count; $i++) {
             $pair = $pairs[$i]
+            Assert-PairLayout $pair
             if (!(Test-Path -LiteralPath $pair.Source -PathType Container)) {
                 Write-Color ("Missing source, skipped: " + $pair.Source) "DarkYellow"
                 Write-Log "WARN" "Missing source skipped: $($pair.Name)"
@@ -1259,10 +2558,10 @@ function Start-Watcher {
             $fsw = New-Object System.IO.FileSystemWatcher
             $fsw.Path = $pair.Source
             $fsw.IncludeSubdirectories = $true
-            $fsw.InternalBufferSize = [Math]::Max(4096, [int]$script:Config.WatchBufferKB * 1024)
+            $fsw.InternalBufferSize = [Math]::Min(65536, [Math]::Max(4096, [int]$script:Config.WatchBufferKB * 1024))
             $fsw.NotifyFilter = [System.IO.NotifyFilters]'FileName, DirectoryName, LastWrite, Size, CreationTime'
-            foreach ($ev in @("Created","Changed","Deleted","Renamed")) {
-                $srcId = "MBP|$i|$ev"
+            foreach ($ev in @("Created","Changed","Deleted","Renamed","Error")) {
+                $srcId = "MQ|$i|$ev"
                 $sub = Register-ObjectEvent -InputObject $fsw -EventName $ev -SourceIdentifier $srcId
                 $subscriptions.Add($sub) | Out-Null
             }
@@ -1280,11 +2579,17 @@ function Start-Watcher {
                 Process-WatcherEvent $queuedEvt
                 Remove-Event -EventIdentifier $queuedEvt.EventIdentifier -ErrorAction SilentlyContinue
             }
+            if ([IO.File]::Exists($script:StopWatcherRequestPath)) {
+                Remove-OwnedPath $script:DataDir $script:StopWatcherRequestPath
+                break
+            }
             Process-ClearQueueRequest
             Flush-PendingEvents
         }
     } finally {
-        foreach ($s in $subscriptions) { Unregister-Event -SubscriptionId $s.Id -ErrorAction SilentlyContinue }
+        foreach ($pendingItem in $script:Pending.Values) { $pendingItem.Due=[datetime]::MinValue }
+        try { Flush-PendingEvents } catch { Write-Log "ERROR" "Watcher shutdown flush failed; run Full Mirror preview" }
+        foreach ($subscription in $subscriptions) { try { Unregister-Event -SubscriptionId $subscription.SubscriptionId -ErrorAction Stop } catch { Write-Log "WARN" "Event unsubscribe failed: $($_.Exception.Message)" } }
         foreach ($w in $watchers) { try { $w.EnableRaisingEvents = $false; $w.Dispose() } catch {} }
         if ($script:Mutex) { try { $script:Mutex.ReleaseMutex() | Out-Null; $script:Mutex.Dispose() } catch {} }
     }
@@ -1301,7 +2606,10 @@ function Process-WatcherEvent {
         if ($idx -lt 0 -or $idx -ge $pairs.Count) { return }
         $pair = $pairs[$idx]
         $args = $Evt.SourceEventArgs
+        if ($eventName -eq 'Error') { Write-Log 'ERROR' 'Watcher overflow or source error: run Full Mirror preview to recover missed changes'; return }
         $path = $args.FullPath
+        if (-not (Test-PathInsideRoot $pair.Source $path)) { return }
+        Assert-NoReparsePath $path
         if ($eventName -eq "Renamed") {
             $oldPath = $args.OldFullPath
             $newPathExcluded = Test-Excluded -Pair $pair -FullPath $path
@@ -1321,22 +2629,22 @@ function Process-WatcherEvent {
             }
             if (-not (Test-Excluded -Pair $pair -FullPath $oldPath)) {
                 if ($renamedIsDir -ne $null) {
-                    Add-PendingEvent (New-QueueEntry -Pair $pair -FullPath $oldPath -Action "Delete" -KnownIsDirectory ([bool]$renamedIsDir))
+                    Add-PendingEvent (New-QueueEntry -Pair $pair -FullPath $oldPath -Action "Delete" -KnownIsDirectory ([bool]$renamedIsDir) -EventKind "RenamedOld" -BaselineState "Present")
                 } else {
-                    Add-PendingEvent (New-QueueEntry -Pair $pair -FullPath $oldPath -Action "Delete")
+                    Add-PendingEvent (New-QueueEntry -Pair $pair -FullPath $oldPath -Action "Delete" -EventKind "RenamedOld" -BaselineState "Present")
                 }
             }
             if (-not $newPathExcluded) {
                 if ($renamedIsDir -ne $null) {
-                    $entry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory ([bool]$renamedIsDir)
+                    $entry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory ([bool]$renamedIsDir) -EventKind "RenamedNew" -BaselineState "Unknown"
                 } else {
-                    $entry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert"
+                    $entry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -EventKind "RenamedNew" -BaselineState "Unknown"
                 }
                 Add-PendingEvent $entry
                 if ($pathOk) {
                     if ([bool]$renamedIsDir) {
                         Write-Log "SCAN" ("Renamed dir: $path")
-                        $scanEntry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory $true
+                        $scanEntry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory $true -EventKind "RenamedNew" -BaselineState "Unknown"
                         Queue-DirectorySnapshot $scanEntry
                     }
                 } else {
@@ -1347,11 +2655,11 @@ function Process-WatcherEvent {
         }
         if (Test-Excluded -Pair $pair -FullPath $path) { return }
         if ($eventName -eq "Deleted") {
-            Add-PendingEvent (New-QueueEntry -Pair $pair -FullPath $path -Action "Delete")
+            Add-PendingEvent (New-QueueEntry -Pair $pair -FullPath $path -Action "Delete" -EventKind "Deleted" -BaselineState "Present")
         } elseif ($eventName -eq "Created") {
             if (!(Test-Path -LiteralPath $path)) { return }
             $isDir = Test-Path -LiteralPath $path -PathType Container
-            $entry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory $isDir
+            $entry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory $isDir -EventKind "Created" -BaselineState "Unknown"
             Add-PendingEvent $entry
             if ($isDir) {
                 $maxRetries = 10
@@ -1363,7 +2671,7 @@ function Process-WatcherEvent {
                 } while (-not $pathOk -and $retry -lt $maxRetries)
                 if ($pathOk) {
                     Write-Log "SCAN" ("Created dir: $path")
-                    $scanEntry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory $true
+                    $scanEntry = New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory $true -EventKind "Created" -BaselineState "Unknown"
                     Queue-DirectorySnapshot $scanEntry
                 } else {
                     Write-Log "WARN" ("Created dir not available for snapshot: $path")
@@ -1372,7 +2680,8 @@ function Process-WatcherEvent {
         } else {
             if (!(Test-Path -LiteralPath $path)) { return }
             $isDir = Test-Path -LiteralPath $path -PathType Container
-            Add-PendingEvent (New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory $isDir)
+            if ($isDir) { return }
+            Add-PendingEvent (New-QueueEntry -Pair $pair -FullPath $path -Action "Upsert" -KnownIsDirectory $isDir -EventKind "Changed" -BaselineState "Present")
         }
     } catch {
         Write-Log "ERROR" "Process event failed: $($_.Exception.Message)"
@@ -1380,10 +2689,14 @@ function Process-WatcherEvent {
 }
 
 function Test-FileNeedsCopy {
-    param([string]$Source, [string]$Dest)
+    param(
+        [string]$Source,
+        [string]$Dest,
+        [object]$SourceItem = $null
+    )
     if (!(Test-Path -LiteralPath $Dest)) { return $true }
     try {
-        $s = Get-Item -LiteralPath $Source -Force
+        $s = if ($null -ne $SourceItem) { $SourceItem } else { Get-Item -LiteralPath $Source -Force }
         $d = Get-Item -LiteralPath $Dest -Force
         if ($s.Length -ne $d.Length) { return $true }
         $diff = [Math]::Abs(($s.LastWriteTimeUtc - $d.LastWriteTimeUtc).TotalSeconds)
@@ -1397,9 +2710,10 @@ function Copy-FileStreamWithProgress {
     param(
         [string]$Source,
         [string]$Destination,
-        [scriptblock]$ProgressCallback = $null
+        [scriptblock]$ProgressCallback = $null,
+        [object]$SourceItem = $null
     )
-    $sourceItem = Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+    $sourceItem = if ($null -ne $SourceItem) { $SourceItem } else { Get-Item -LiteralPath $Source -Force -ErrorAction Stop }
     $total = [int64]$sourceItem.Length
     $copied = [int64]0
     if ($ProgressCallback) { & $ProgressCallback $copied $total }
@@ -1409,7 +2723,7 @@ function Copy-FileStreamWithProgress {
     $inputStream = $null
     $outputStream = $null
     try {
-        $inputStream = [System.IO.File]::Open($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $inputStream = [System.IO.File]::Open($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         $outputStream = [System.IO.File]::Open($Destination, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
         while ($true) {
             $read = $inputStream.Read($buffer, 0, $buffer.Length)
@@ -1424,80 +2738,140 @@ function Copy-FileStreamWithProgress {
         if ($inputStream) { $inputStream.Dispose() }
     }
     if ($ProgressCallback -and $copied -ne $total) { & $ProgressCallback $total $total }
+    return [int64]$copied
 }
 
 function Copy-FileSafe {
     param(
         [string]$Source,
         [string]$Dest,
-        [scriptblock]$ProgressCallback = $null
+        [scriptblock]$ProgressCallback = $null,
+        [object]$SourceItem = $null
     )
+    $sourceItem = if ($null -ne $SourceItem) { $SourceItem } else { Get-Item -LiteralPath $Source -Force -ErrorAction Stop }
+    Assert-NoReparsePath $Source
+    Assert-NoReparsePath $Dest
     $destDir = Split-Path -Parent $Dest
     if (!(Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+    $copied = [int64]0
     if ([bool]$script:Config.CopyTempThenReplace) {
         $name = Split-Path -Leaf $Dest
-        $tmp = Join-Path $destDir (".$name.mbtmp-$([guid]::NewGuid().ToString('N'))")
+        $tmp = Join-Path $destDir (".$name.mqtmp-$([guid]::NewGuid().ToString('N'))")
+        $backup = $null
         try {
-            Copy-FileStreamWithProgress -Source $Source -Destination $tmp -ProgressCallback $ProgressCallback
+            $copied = Copy-FileStreamWithProgress -Source $Source -Destination $tmp -ProgressCallback $ProgressCallback -SourceItem $sourceItem
             if ([bool]$script:Config.PreserveModifiedTime) {
-                try { (Get-Item -LiteralPath $tmp -Force).LastWriteTimeUtc = (Get-Item -LiteralPath $Source -Force).LastWriteTimeUtc } catch {}
+                try { (Get-Item -LiteralPath $tmp -Force).LastWriteTimeUtc = $sourceItem.LastWriteTimeUtc } catch {}
             }
-            if (Test-Path -LiteralPath $Dest) { Remove-Item -LiteralPath $Dest -Force -ErrorAction Stop }
-            Move-Item -LiteralPath $tmp -Destination $Dest -Force
+            if (Test-Path -LiteralPath $Dest -PathType Leaf) {
+                $destItem = Get-Item -LiteralPath $Dest -Force -ErrorAction Stop
+                if ($destItem.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+                    $destItem.Attributes = $destItem.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+                }
+                $backup = Join-Path $destDir (".$name.mqbackup-$([guid]::NewGuid().ToString('N'))")
+                [System.IO.File]::Replace($tmp, $Dest, $backup)
+                try { if ([System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) } } catch {}
+                if (-not [System.IO.File]::Exists($backup)) { $backup = $null }
+            } else {
+                [System.IO.File]::Move($tmp, $Dest)
+            }
+            $tmp = $null
         } finally {
-            if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+            if (-not [string]::IsNullOrWhiteSpace($tmp) -and (Test-Path -LiteralPath $tmp)) {
+                Remove-OwnedPath ([IO.Path]::GetDirectoryName($tmp)) $tmp
+            }
+            if (-not [string]::IsNullOrWhiteSpace($backup) -and (Test-Path -LiteralPath $backup)) {
+                Remove-OwnedPath ([IO.Path]::GetDirectoryName($backup)) $backup
+            }
         }
     } else {
-        Copy-FileStreamWithProgress -Source $Source -Destination $Dest -ProgressCallback $ProgressCallback
+        $copied = Copy-FileStreamWithProgress -Source $Source -Destination $Dest -ProgressCallback $ProgressCallback -SourceItem $sourceItem
         if ([bool]$script:Config.PreserveModifiedTime) {
-            try { (Get-Item -LiteralPath $Dest -Force).LastWriteTimeUtc = (Get-Item -LiteralPath $Source -Force).LastWriteTimeUtc } catch {}
+            try { (Get-Item -LiteralPath $Dest -Force).LastWriteTimeUtc = $sourceItem.LastWriteTimeUtc } catch {}
         }
     }
     if ([bool]$script:Config.CopyAttributes) {
-        try { (Get-Item -LiteralPath $Dest -Force).Attributes = (Get-Item -LiteralPath $Source -Force).Attributes } catch {}
+        try { (Get-Item -LiteralPath $Dest -Force).Attributes = $sourceItem.Attributes } catch {}
+    }
+    return [pscustomobject]@{
+        BytesCopied = [int64]$copied
+        TotalBytes = [int64]$sourceItem.Length
     }
 }
 
 function Apply-OneEntry {
     param(
         [object]$Entry,
-        [scriptblock]$ProgressCallback = $null
+        [scriptblock]$ProgressCallback = $null,
+        [Nullable[bool]]$DestinationOnline = $null,
+        [object]$PairOverride = $null,
+        [switch]$MissingOnly,
+        [switch]$MirrorDelete
     )
-    $pair = Find-PairByName $Entry.PairName
+    $pair = if ($null -ne $PairOverride) { $PairOverride } else { Find-PairByName $Entry.PairName }
     if ($null -eq $pair) { return [pscustomobject]@{ Pair=$Entry.PairName; Action=$Entry.Action; Path=$Entry.RelPath; Status="FAILED"; Message="Pair not found" } }
-    if (-not (Test-DestRootAvailable $pair.Dest)) { return [pscustomobject]@{ Pair=$pair.Name; Action="SKIP"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Destination drive offline" } }
-    $srcRoot = $pair.Source
+    $isOnline = if ($DestinationOnline -ne $null) { [bool]$DestinationOnline } else { Test-DestRootAvailable $pair.Dest }
+    if (-not $isOnline) { return [pscustomobject]@{ Pair=$pair.Name; Action="SKIP"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Destination drive offline" } }
     $dstRoot = Resolve-DestinationPath $pair.Dest
-    $source = Join-PathSafe $srcRoot $Entry.RelPath
-    $dest = Join-PathSafe $dstRoot $Entry.RelPath
     try {
+        $paths = Get-SafeEntryPaths $pair $Entry
+        $source=$paths.Source; $dest=$paths.Destination
+        if (Test-Excluded $pair $source ([bool]$Entry.IsDirectory)) {
+            return [pscustomobject]@{ Pair=$pair.Name; Action=$Entry.Action; Path=$Entry.RelPath; Status='SKIPPED'; Message='Excluded by current configuration'; RetainPending=$true }
+        }
         if ($Entry.Action -eq "Delete") {
-            if (-not [bool]$script:Config.DeleteDestOnSourceDelete) {
-                return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Delete disabled" }
+            if (-not $MirrorDelete -and -not [bool]$script:Config.DeleteDestOnSourceDelete) {
+                return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Delete disabled"; RetainPending=$true }
             }
-            if (Test-Path -LiteralPath $dest) {
-                Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction Stop
+            $sourceProbe = Get-ExactPathProbe $source
+            if ([string]$sourceProbe.State -ne "Missing") {
+                $message = $(if ([string]$sourceProbe.State -eq "Exists") { "Source restored; delete canceled" } else { "Source check failed; delete canceled" })
+                return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="SKIPPED"; Message=$message; RetainPending=$true; ResultKind="DeleteCanceled" }
+            }
+            # Missing source media/root is not evidence that the user deleted this entry.
+            $sourceRootProbe = Get-ExactPathProbe ([string]$pair.Source)
+            if ($sourceRootProbe.State -ne "Exists" -or -not $sourceRootProbe.IsDirectory) {
+                return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Source root unavailable; delete canceled"; RetainPending=$true; ResultKind="DeleteCanceled" }
+            }
+            $destProbe = Get-ExactPathProbe $dest
+            if ([string]$destProbe.State -eq "Exists") {
+                Remove-VerifiedDestination $pair ([string]$Entry.RelPath)
                 return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="OK"; Message="" }
             }
-            return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Destination missing" }
+            if ([string]$destProbe.State -eq "Error") {
+                return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Destination drive offline"; RetainPending=$true; ResultKind="DestinationIndeterminate" }
+            }
+            $destRoot = [string][System.IO.Path]::GetPathRoot($dstRoot)
+            $destRootProbe = Get-ExactPathProbe $destRoot
+            if ([string]::IsNullOrWhiteSpace($destRoot) -or [string]$destRootProbe.State -ne "Exists") {
+                return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Destination drive offline"; RetainPending=$true; ResultKind="DestinationIndeterminate" }
+            }
+            return [pscustomobject]@{ Pair=$pair.Name; Action="DELETE"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Destination missing"; ResultKind="ObsoleteDelete" }
         }
-        if (!(Test-Path -LiteralPath $source)) {
+        $sourceProbe=Get-ExactPathProbe $source
+        $destProbe=Get-ExactPathProbe $dest
+        if ($sourceProbe.State -eq 'Error' -or $destProbe.State -eq 'Error') { throw 'Path check failed' }
+        if ($sourceProbe.State -eq 'Exists' -and [bool]$sourceProbe.IsDirectory -ne [bool]$Entry.IsDirectory) { throw 'Source kind changed; rescan required' }
+        if ($destProbe.State -eq 'Exists' -and [bool]$destProbe.IsDirectory -ne [bool]$Entry.IsDirectory) { throw 'Source/destination type conflict; review required' }
+        if ($MissingOnly -and $destProbe.State -eq 'Exists') { return [pscustomobject]@{Pair=$pair.Name;Action='COPY';Path=$Entry.RelPath;Status='SKIPPED';Message='Existing destination preserved'} }
+        if ($sourceProbe.State -ne 'Exists') {
             return [pscustomobject]@{ Pair=$pair.Name; Action="COPY"; Path=$Entry.RelPath; Status="FAILED"; Message="Source missing" }
         }
         if ($Entry.IsDirectory) {
             if (Test-Path -LiteralPath $dest -PathType Container) {
                 return [pscustomobject]@{ Pair=$pair.Name; Action="MKDIR"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Directory exists" }
             }
-            New-Item -ItemType Directory -Path $dest -Force | Out-Null
+            [IO.Directory]::CreateDirectory($dest) | Out-Null
             return [pscustomobject]@{ Pair=$pair.Name; Action="MKDIR"; Path=$Entry.RelPath; Status="OK"; Message="" }
         }
-        if (Test-FileNeedsCopy -Source $source -Dest $dest) {
-            Copy-FileSafe -Source $source -Dest $dest -ProgressCallback $ProgressCallback
-            return [pscustomobject]@{ Pair=$pair.Name; Action="COPY"; Path=$Entry.RelPath; Status="OK"; Message="" }
+        $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+        if (Test-FileNeedsCopy -Source $source -Dest $dest -SourceItem $sourceItem) {
+            $copyInfo = Copy-FileSafe -Source $source -Dest $dest -ProgressCallback $ProgressCallback -SourceItem $sourceItem
+            return [pscustomobject]@{ Pair=$pair.Name; Action="COPY"; Path=$Entry.RelPath; Status="OK"; Message=""; BytesCopied=[int64]$copyInfo.BytesCopied; TotalBytes=[int64]$copyInfo.TotalBytes }
         }
-        return [pscustomobject]@{ Pair=$pair.Name; Action="COPY"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Already current" }
+        return [pscustomobject]@{ Pair=$pair.Name; Action="COPY"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Already current"; BytesCopied=[int64]$sourceItem.Length; TotalBytes=[int64]$sourceItem.Length }
     } catch {
-        return [pscustomobject]@{ Pair=$pair.Name; Action=$Entry.Action.ToUpperInvariant(); Path=$Entry.RelPath; Status="FAILED"; Message=$(Format-ErrorSummary $_.Exception.Message) }
+        return [pscustomobject]@{ Pair=$pair.Name; Action=$Entry.Action.ToUpperInvariant(); Path=$Entry.RelPath; Status="FAILED"; Message=$_.Exception.Message; RetainPending=$true }
     }
 }
 
@@ -1518,176 +2892,613 @@ function Get-ApplyProgressFinalStatus {
     return "DONE"
 }
 
-function Test-ApplyResultSelectedForDisplay {
-    param([object]$Entry, [object]$Result, [hashtable]$VisibleEntryKeys = $null)
-    if ($null -eq $Result) { return $true }
-    if ($Result.Status -eq "FAILED") { return $true }
-    if ($null -ne $VisibleEntryKeys -and $null -ne $Entry -and $VisibleEntryKeys.ContainsKey((Get-QueueEntryKey $Entry))) { return $true }
-    if ($Result.Status -eq "SKIPPED" -and ($Result.Message -eq "Destination drive offline" -or $Result.Message -eq "Delete disabled")) { return $true }
-    return $false
+function Get-QueuePathDepth {
+    param([string]$RelPath)
+    $normalized = Normalize-QueueRelPath $RelPath
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return 0 }
+    return @($normalized.Split('\')).Count
 }
 
-function Invoke-ApplyPending {
-    param([switch]$Quiet)
-    $entries = @(Read-QueueEntries)
-    $latest = @(Get-LatestQueueEntries $entries)
-    $latest = @(Remove-OrphanedUpserts $latest)
-    if ($latest.Count -eq 0) {
-        if (-not $Quiet) {
-            Show-Header "Apply Pending" "No queued changes"
-            Write-Color "Queue is empty." "Green"
-            Wait-Back
-        }
-        return
+function Get-DirectoryTransferTotalBytes {
+    param([object]$Entry)
+    $pair = Find-PairByName ([string]$Entry.PairName)
+    if ($null -eq $pair) {
+        return [pscustomobject]@{ Known=$false; TotalBytes=[int64]0 }
     }
-    Show-Header "Apply Pending" "Recorded source changes only"
-    $results = New-Object System.Collections.Generic.List[object]
-    $displayResults = New-Object System.Collections.Generic.List[object]
-    $visibleResultKeys = @{}
-    foreach ($visibleEntry in @(Get-VisiblePendingEntries $latest)) {
-        $visibleResultKeys[(Get-QueueEntryKey $visibleEntry)] = $true
+    $source = Join-PathSafe ([string]$pair.Source) ([string]$Entry.RelPath)
+    if ([string]::IsNullOrWhiteSpace($source) -or -not (Test-Path -LiteralPath $source -PathType Container)) {
+        return [pscustomobject]@{ Known=$false; TotalBytes=[int64]0 }
     }
-    $okKeys = New-Object System.Collections.Generic.List[string]
-    $appliedDeletes = New-Object System.Collections.Generic.List[object]
-    $cursorChanged = $false
-    $previousCursorVisible = $true
     try {
-        try {
-            if (-not [Console]::IsOutputRedirected) {
-                $previousCursorVisible = [Console]::CursorVisible
-                [Console]::CursorVisible = $false
-                $cursorChanged = $true
-            }
-        } catch {}
-
-        $progressTable = New-ApplyProgressTable -Entries $latest -VisibleEntryKeys $visibleResultKeys
-        for ($i = 0; $i -lt $latest.Count; $i++) {
-            $entry = $latest[$i]
-            $rowIndex = $i
-            $startedAt = Get-Date
-            $startStatus = Get-ApplyProgressStartingStatus $entry
-            Update-ApplyProgressRow -Table $progressTable -Index $rowIndex -Status $startStatus -StartedAt $startedAt -ForceRender
-            $progressCallback = {
-                param([int64]$CopiedBytes, [int64]$TotalBytes)
-                Update-ApplyProgressRow -Table $progressTable -Index $rowIndex -Status "COPYING" -CopiedBytes $CopiedBytes -TotalBytes $TotalBytes -StartedAt $startedAt
-            }
-            $r = Apply-OneEntry -Entry $entry -ProgressCallback $progressCallback
-            $finalStatus = Get-ApplyProgressFinalStatus $r
-            $finalTotal = Get-ApplyEntryTotalBytes $entry
-            $finalCopied = if (($finalStatus -eq "DONE" -or ($finalStatus -eq "SKIPPED" -and $r.Message -eq "Already current")) -and $finalTotal -gt 0) { $finalTotal } else { [int64]0 }
-            if ($finalStatus -eq "DONE") {
-                try {
-                    $pair = Find-PairByName $entry.PairName
-                    if ($null -ne $pair) {
-                        $dstRoot = Resolve-DestinationPath $pair.Dest
-                        $destPath = Join-PathSafe $dstRoot $entry.RelPath
-                        if (Test-Path -LiteralPath $destPath -PathType Leaf) {
-                            $finalTotal = [int64](Get-Item -LiteralPath $destPath -Force).Length
-                            $finalCopied = $finalTotal
-                        }
-                    }
-                } catch {}
-            }
-            $showInDisplay = Test-ApplyResultSelectedForDisplay -Entry $entry -Result $r -VisibleEntryKeys $visibleResultKeys
-            Update-ApplyProgressRow -Table $progressTable -Index $rowIndex -Status $finalStatus -CopiedBytes $finalCopied -TotalBytes $finalTotal -Complete -ForceRender -ShowIfHidden:$showInDisplay
-            $results.Add($r) | Out-Null
-            if ($showInDisplay) {
-                $displayResults.Add($r) | Out-Null
-            }
-            if ($r.Status -ne "FAILED" -and $r.Message -ne "Destination drive offline") {
-                $okKeys.Add((Get-QueueEntryKey $entry))
-                if ($entry.Action -eq "Delete" -and ($r.Status -eq "OK" -or ($r.Status -eq "SKIPPED" -and $r.Message -eq "Destination missing"))) {
-                    $appliedDeletes.Add($entry) | Out-Null
+        $totalBytes = [int64]0
+        $pendingDirectories = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+        $pendingDirectories.Push([System.IO.DirectoryInfo]::new($source))
+        while ($pendingDirectories.Count -gt 0) {
+            $directory = $pendingDirectories.Pop()
+            foreach ($item in @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)) {
+                if ($item.PSIsContainer) {
+                    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                    if (Test-Excluded -Pair $pair -FullPath $item.FullName -IsDirectory $true) { continue }
+                    $pendingDirectories.Push([System.IO.DirectoryInfo]$item)
+                } elseif (-not (Test-Excluded -Pair $pair -FullPath $item.FullName -IsDirectory $false)) {
+                    $totalBytes += [int64]$item.Length
                 }
             }
         }
-        $remaining = @($entries | Where-Object {
-            $key = Get-QueueEntryKey $_
-            -not $okKeys.Contains($key) -and -not (Test-QueueEntryCoveredByAppliedDelete -Entry $_ -AppliedDeletes @($appliedDeletes.ToArray()))
+        return [pscustomobject]@{ Known=$true; TotalBytes=$totalBytes }
+    } catch {
+        Write-Log "WARN" ("Could not measure pending directory size: {0} :: {1}" -f $source, (Format-ErrorSummary $_.Exception.Message))
+        return [pscustomobject]@{ Known=$false; TotalBytes=[int64]0 }
+    }
+}
+
+function Get-ApplyExecutionPlan {
+    param([object[]]$Entries)
+    $allEntries = @($Entries)
+    $coveredKeys = @{}
+    $directoryJobs = New-Object System.Collections.Generic.List[object]
+    $candidates = @($allEntries | Where-Object {
+        $_.Action -eq "Upsert" -and [bool]$_.IsDirectory
+    } | Sort-Object @{Expression={ Get-QueuePathDepth ([string]$_.RelPath) }}, PairName, RelPath)
+
+    foreach ($root in $candidates) {
+        $rootKey = Get-QueueEntryKey $root
+        if ($coveredKeys.ContainsKey($rootKey)) { continue }
+        $covered = @($allEntries | Where-Object {
+            $_.Action -eq "Upsert" -and
+            ((Get-QueueEntryKey $_) -eq $rootKey -or (Test-QueueEntryChildOf -Entry $_ -Parent $root))
         })
-        $knownIds = @($entries | ForEach-Object { $_.Id })
-        $currentOnDisk = @(Read-QueueEntries)
-        $newFromWatcher = @($currentOnDisk | Where-Object { $knownIds -notcontains $_.Id })
-        Write-QueueEntries ($remaining + $newFromWatcher)
+        foreach ($entry in $covered) { $coveredKeys[(Get-QueueEntryKey $entry)] = $true }
+        $sizeMeasurement = Get-DirectoryTransferTotalBytes $root
+        $root | Add-Member -NotePropertyName "CoveredCount" -NotePropertyValue $covered.Count -Force
+        if ([bool]$sizeMeasurement.Known) {
+            $root | Add-Member -NotePropertyName "CoveredTotalBytes" -NotePropertyValue ([int64]$sizeMeasurement.TotalBytes) -Force
+        } elseif ($null -ne $root.PSObject.Properties["CoveredTotalBytes"]) {
+            $root.PSObject.Properties.Remove("CoveredTotalBytes")
+        }
+        $directoryJobs.Add([pscustomobject]@{ Root=$root; Entries=$covered }) | Out-Null
+    }
+
+    $deletes = @($allEntries | Where-Object Action -eq "Delete" |
+        Sort-Object @{Expression={ Get-QueuePathDepth ([string]$_.RelPath) };Descending=$true}, PairName, RelPath)
+    $files = @($allEntries | Where-Object {
+        $_.Action -eq "Upsert" -and -not [bool]$_.IsDirectory -and -not $coveredKeys.ContainsKey((Get-QueueEntryKey $_))
+    } | Sort-Object PairName, RelPath)
+    $displayEntries = @($deletes) + @($directoryJobs | ForEach-Object { $_.Root }) + @($files)
+
+    return [pscustomobject]@{
+        Deletes = @($deletes)
+        DirectoryJobs = @($directoryJobs.ToArray())
+        Files = @($files)
+        DisplayEntries = @($displayEntries)
+        RawCount = $allEntries.Count
+    }
+}
+
+function Remove-DirectoryTreeSafe {
+    param([string]$Path)
+    if ([IO.Path]::GetFileName($Path) -notmatch '^\..+\.mqdirtemp-[0-9a-fA-F]{32}$') { throw 'Not an owned directory staging path' }
+    Remove-OwnedPath ([IO.Path]::GetDirectoryName($Path)) $Path -Recurse
+}
+
+function Get-DirectoryStagingPath {
+    param([string]$Destination, [string]$Id = "")
+    if ([string]::IsNullOrWhiteSpace($Id)) { $Id = [guid]::NewGuid().ToString("N") }
+    $parent = Split-Path -Parent $Destination
+    $leaf = Split-Path -Leaf $Destination
+    return (Join-Path $parent (".{0}.mqdirtemp-{1}" -f $leaf, $Id))
+}
+
+
+
+function Build-DirectoryTreeRobocopyArgs {
+    param([object]$Pair, [string]$Source, [string]$Destination)
+    $copyFlags = "D"
+    if ([bool]$script:Config.CopyAttributes) { $copyFlags += "A" }
+    if ([bool]$script:Config.PreserveModifiedTime) { $copyFlags += "T" }
+    $args = @(
+        $Source, $Destination, "/E", "/FFT", "/Z",
+        ("/MT:{0}" -f [int]$script:Config.RobocopyThreads),
+        ("/R:{0}" -f [int]$script:Config.RobocopyRetries),
+        ("/W:{0}" -f [int]$script:Config.RobocopyWaitSeconds),
+        ("/COPY:{0}" -f $copyFlags), ("/DCOPY:{0}" -f $copyFlags),
+        "/XJ", "/NP", "/NFL", "/NDL", "/NJH", "/NJS"
+    )
+    $excludeDirs = @()
+    $excludeDirs += @(Get-Array $script:Config.GlobalExcludeDirs)
+    $excludeDirs += @(Get-MapArray "PairExcludeDirs" $Pair.Name | ForEach-Object {
+        Convert-PairExcludeDirForRobocopy $Pair ([string]$_)
+    } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $excludeFiles = @()
+    $excludeFiles += @(Get-Array $script:Config.GlobalExcludeFiles)
+    $excludeFiles += @(Get-MapArray "PairExcludeFiles" $Pair.Name | ForEach-Object {
+        $pattern=([string]$_).Replace('/','\')
+        if ($pattern.Contains('\') -and -not [IO.Path]::IsPathRooted($pattern)) { [IO.Path]::Combine([string]$Pair.Source,$pattern) } else { $pattern }
+    })
+    if ($excludeDirs.Count -gt 0) { $args += "/XD"; $args += $excludeDirs }
+    if ($excludeFiles.Count -gt 0) { $args += "/XF"; $args += $excludeFiles }
+    return @($args)
+}
+
+function Invoke-StagedDirectoryMerge {
+    param([string]$StageRoot, [string]$DestinationRoot)
+    try {
+        Assert-NoReparsePath $StageRoot
+        Assert-NoReparsePath $DestinationRoot
+        [System.IO.Directory]::CreateDirectory($DestinationRoot) | Out-Null
+        $stageDirectories = @(Get-ChildItem -LiteralPath $StageRoot -Directory -Recurse -Force -ErrorAction Stop |
+            Sort-Object @{Expression={ Get-QueuePathDepth (Get-RelativePath $StageRoot $_.FullName) }})
+        foreach ($dir in $stageDirectories) {
+            $rel = Get-RelativePath $StageRoot $dir.FullName
+            $target = Join-PathSafe $DestinationRoot $rel
+            Assert-NoReparsePath $target
+            [System.IO.Directory]::CreateDirectory($target) | Out-Null
+        }
+        $stageFiles = @(Get-ChildItem -LiteralPath $StageRoot -File -Recurse -Force -ErrorAction Stop)
+        $bytesCopied = [int64]0
+        foreach ($file in $stageFiles) {
+            $rel = Get-RelativePath $StageRoot $file.FullName
+            $target = Join-PathSafe $DestinationRoot $rel
+            Assert-NoReparsePath $target
+            if (Test-FileNeedsCopy -Source $file.FullName -Dest $target -SourceItem $file) {
+                $copy = Copy-FileSafe -Source $file.FullName -Dest $target -SourceItem $file
+                $bytesCopied += [int64]$copy.BytesCopied
+            }
+        }
+        $allDirectories = @((Get-Item -LiteralPath $StageRoot -Force)) + $stageDirectories
+        foreach ($dir in $allDirectories) {
+            $rel = Get-RelativePath $StageRoot $dir.FullName
+            $target = if ([string]::IsNullOrWhiteSpace($rel)) { $DestinationRoot } else { Join-PathSafe $DestinationRoot $rel }
+            if ([bool]$script:Config.PreserveModifiedTime) {
+                try { (Get-Item -LiteralPath $target -Force).LastWriteTimeUtc = $dir.LastWriteTimeUtc } catch {}
+            }
+            if ([bool]$script:Config.CopyAttributes) {
+                try { (Get-Item -LiteralPath $target -Force).Attributes = $dir.Attributes } catch {}
+            }
+        }
+        return [pscustomobject]@{ Status="OK"; Message="Merged staged directory safely"; TreeFiles=$stageFiles.Count; TreeDirs=($stageDirectories.Count + 1); BytesCopied=$bytesCopied }
+    } catch {
+        return [pscustomobject]@{ Status="FAILED"; Message=(Format-ErrorSummary $_.Exception.Message); TreeFiles=0; TreeDirs=0; BytesCopied=0 }
+    }
+}
+
+function Invoke-NewDirectoryTreeCopy {
+    param([object]$Job, [bool]$DestinationOnline)
+    $root = $Job.Root
+    $pair = Find-PairByName ([string]$root.PairName)
+    if ($null -eq $pair) {
+        $result = [pscustomobject]@{ Pair=$root.PairName; Action="COPYTREE"; Path=$root.RelPath; Status="FAILED"; Message="Pair not found" }
+        return [pscustomobject]@{ Results=@([pscustomobject]@{Entry=$root;Result=$result}); SuccessfulKeys=@(); AggregateResult=$result }
+    }
+    if (-not $DestinationOnline) {
+        $result = [pscustomobject]@{ Pair=$root.PairName; Action="COPYTREE"; Path=$root.RelPath; Status="SKIPPED"; Message="Destination drive offline"; RetainPending=$true }
+        return [pscustomobject]@{ Results=@([pscustomobject]@{Entry=$root;Result=$result}); SuccessfulKeys=@(); AggregateResult=$result }
+    }
+    $source = Join-PathSafe ([string]$pair.Source) ([string]$root.RelPath)
+    $destRoot = Resolve-DestinationPath ([string]$pair.Dest)
+    $dest = Join-PathSafe $destRoot ([string]$root.RelPath)
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        $result = [pscustomobject]@{ Pair=$root.PairName; Action="COPYTREE"; Path=$root.RelPath; Status="FAILED"; Message="Source missing" }
+        return [pscustomobject]@{ Results=@([pscustomobject]@{Entry=$root;Result=$result}); SuccessfulKeys=@(); AggregateResult=$result }
+    }
+    $stageTree = Get-DirectoryStagingPath -Destination $dest
+    $result = $null
+    $proc = $null
+    try {
+        $null = Get-SafeEntryPaths $pair $root
+        if (Test-Excluded $pair $source $true) { throw 'Directory excluded by current configuration' }
+        $null = @(Get-SafeTreeItems $source $pair)
+        [System.IO.Directory]::CreateDirectory($stageTree) | Out-Null
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "robocopy.exe"
+        $psi.Arguments = ConvertTo-ProcessArgumentString (Build-DirectoryTreeRobocopyArgs -Pair $pair -Source $source -Destination $stageTree)
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        [void]$proc.Start()
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $proc.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        $code = [int]$proc.ExitCode
+        $proc.Dispose(); $proc=$null
+        if ($code -gt 7) { throw ("Robocopy failed with code {0}: {1} {2}" -f $code, $stderr.Trim(), (($stdout -split "`r?`n" | Select-Object -Last 12) -join " ")) }
+        $stageFiles = @(Get-ChildItem -LiteralPath $stageTree -File -Recurse -Force -ErrorAction Stop)
+        $stageDirs = @(Get-ChildItem -LiteralPath $stageTree -Directory -Recurse -Force -ErrorAction Stop)
+        $treeBytes = [int64](($stageFiles | Measure-Object Length -Sum).Sum)
+        $null = Get-SafeEntryPaths $pair $root
+        if (Test-Path -LiteralPath $dest) {
+            $merge = Invoke-StagedDirectoryMerge -StageRoot $stageTree -DestinationRoot $dest
+            $aggregate = [pscustomobject]@{ Pair=$root.PairName; Action="COPYTREE"; Path=$root.RelPath; Status=$merge.Status; Message=$merge.Message; TreeFiles=$merge.TreeFiles; TreeDirs=$merge.TreeDirs; BytesCopied=$merge.BytesCopied }
+            $successful = if ($merge.Status -eq "OK") { @($Job.Entries | ForEach-Object { Get-QueueEntryKey $_ }) } else { @() }
+            return [pscustomobject]@{ Results=@([pscustomobject]@{Entry=$root;Result=$aggregate}); SuccessfulKeys=$successful; AggregateResult=$aggregate }
+        }
+        $destParent = Split-Path -Parent $dest
+        [System.IO.Directory]::CreateDirectory($destParent) | Out-Null
+        [System.IO.Directory]::Move($stageTree, $dest)
+        $successful = @($Job.Entries | ForEach-Object { Get-QueueEntryKey $_ })
+        $result = [pscustomobject]@{ Pair=$root.PairName; Action="COPYTREE"; Path=$root.RelPath; Status="OK"; Message=("Copied as one directory job ({0} queued items)" -f @($Job.Entries).Count); TreeFiles=$stageFiles.Count; TreeDirs=($stageDirs.Count + 1); BytesCopied=$treeBytes }
+        return [pscustomobject]@{ Results=@([pscustomobject]@{Entry=$root;Result=$result}); SuccessfulKeys=$successful; AggregateResult=$result }
+    } catch {
+        $result = [pscustomobject]@{ Pair=$root.PairName; Action="COPYTREE"; Path=$root.RelPath; Status="FAILED"; Message=(Format-ErrorSummary $_.Exception.Message) }
+        Write-Log "ERROR" ("Directory tree copy failed: {0} :: {1}" -f $root.RelPath, $_.Exception.Message)
+        return [pscustomobject]@{ Results=@([pscustomobject]@{Entry=$root;Result=$result}); SuccessfulKeys=@(); AggregateResult=$result }
     } finally {
-        if ($cursorChanged) {
-            try { [Console]::CursorVisible = $previousCursorVisible } catch {}
+        if ($null -ne $proc) { try { if (-not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit() } } finally { $proc.Dispose() } }
+        try {
+            if ([System.IO.Directory]::Exists($stageTree)) { Remove-DirectoryTreeSafe -Path $stageTree }
+        } catch {}
+    }
+}
+
+function Invoke-ParallelFileTransfers {
+    param(
+        [object[]]$Entries,
+        [hashtable]$PairOnline,
+        [object]$ProgressTable,
+        [hashtable]$EntryIndexes,
+        [object]$PairOverride = $null,
+        [switch]$MissingOnly
+    )
+    $completed = New-Object System.Collections.Generic.List[object]
+    $pendingGroups = @{}
+    $readyGroupKeys = New-Object System.Collections.Queue
+    foreach ($entry in @($Entries)) {
+        $pair = if ($null -ne $PairOverride) { $PairOverride } else { Find-PairByName ([string]$entry.PairName) }
+        $key = Get-QueueEntryKey $entry
+        $rowIndex = if ($EntryIndexes.ContainsKey($key)) { [int]$EntryIndexes[$key] } else { -1 }
+        if ($null -eq $pair) {
+            $result = [pscustomobject]@{ Pair=$entry.PairName; Action="COPY"; Path=$entry.RelPath; Status="FAILED"; Message="Pair not found" }
+            $completed.Add([pscustomobject]@{ Entry=$entry; Result=$result }) | Out-Null
+            Update-ApplyProgressRow -Table $ProgressTable -Index $rowIndex -Status "FAILED" -Complete -ForceRender
+            continue
+        }
+        $pairKey = ([string]$entry.PairName).ToUpperInvariant()
+        $online = ($PairOnline.ContainsKey($pairKey) -and [bool]$PairOnline[$pairKey])
+        if (-not $online) {
+            $result = Apply-OneEntry -Entry $entry -DestinationOnline $false
+            $completed.Add([pscustomobject]@{ Entry=$entry; Result=$result }) | Out-Null
+            Update-ApplyProgressRow -Table $ProgressTable -Index $rowIndex -Status (Get-ApplyProgressFinalStatus $result) -Complete -ForceRender
+            continue
+        }
+        try {
+            $paths = Get-SafeEntryPaths $pair $entry
+            if (Test-Excluded $pair $paths.Source $false) { throw 'Excluded by current configuration' }
+            $destination = $paths.Destination
+            $destinationKey = Get-PhysicalDestinationKey $destination
+            if (-not $pendingGroups.ContainsKey($destinationKey)) {
+                $pendingGroups[$destinationKey] = New-Object System.Collections.Queue
+                $readyGroupKeys.Enqueue($destinationKey)
+            }
+            $pendingGroups[$destinationKey].Enqueue($entry)
+        } catch {
+            $result = [pscustomobject]@{ Pair=$entry.PairName; Action="COPY"; Path=$entry.RelPath; Status="FAILED"; Message=(Format-ErrorSummary $_.Exception.Message) }
+            $completed.Add([pscustomobject]@{ Entry=$entry; Result=$result }) | Out-Null
+            Update-ApplyProgressRow -Table $ProgressTable -Index $rowIndex -Status "FAILED" -Complete -ForceRender
         }
     }
-    Show-ApplyResults -Results @($displayResults.ToArray()) -Title "Apply Results" -Compact
+    if ($readyGroupKeys.Count -eq 0) { return @($completed.ToArray()) }
+
+    $maxParallel = [math]::Max(1, [math]::Min(32, [int]$script:Config.ParallelFileTransfers))
+    $script:LastParallelFileTransferLimit = $maxParallel
+    $script:LastParallelFileTransferPeakHandles = 0
+    $progressState = [hashtable]::Synchronized(@{})
+    $workerScript = {
+        param($JobId, $Entry, $Source, $Destination, $CopyTempThenReplace, $PreserveModifiedTime, $CopyAttributes, $TimeToleranceSeconds, $SharedProgress, $MissingOnly)
+        $sourceItem = $null
+        $tmp = $null
+        $backup = $null
+        try {
+            if (-not [System.IO.File]::Exists($Source)) {
+                return [pscustomobject]@{ Pair=$Entry.PairName; Action="COPY"; Path=$Entry.RelPath; Status="FAILED"; Message="Source missing" }
+            }
+            # Attribute reads distinguish permission errors from absence; File.Exists does not.
+            $attributes = $null
+            try { $attributes=[IO.File]::GetAttributes($Destination) }
+            catch [IO.FileNotFoundException] { }
+            catch [IO.DirectoryNotFoundException] { }
+            if ($null -ne $attributes -and ($attributes -band [IO.FileAttributes]::ReparsePoint -or $attributes -band [IO.FileAttributes]::Directory)) { throw 'Unsafe destination kind' }
+            if ($MissingOnly -and $null -ne $attributes) { return [pscustomobject]@{Pair=$Entry.PairName;Action='COPY';Path=$Entry.RelPath;Status='SKIPPED';Message='Existing destination preserved'} }
+            $sourceItem = [System.IO.FileInfo]::new($Source)
+            if ([System.IO.File]::Exists($Destination)) {
+                $destItem = [System.IO.FileInfo]::new($Destination)
+                $timeDiff = [math]::Abs(($sourceItem.LastWriteTimeUtc - $destItem.LastWriteTimeUtc).TotalSeconds)
+                if ($sourceItem.Length -eq $destItem.Length -and $timeDiff -le [double]$TimeToleranceSeconds) {
+                    return [pscustomobject]@{ Pair=$Entry.PairName; Action="COPY"; Path=$Entry.RelPath; Status="SKIPPED"; Message="Already current"; BytesCopied=[int64]$sourceItem.Length; TotalBytes=[int64]$sourceItem.Length }
+                }
+            }
+            $destDir = [System.IO.Path]::GetDirectoryName($Destination)
+            [System.IO.Directory]::CreateDirectory($destDir) | Out-Null
+            $target = $Destination
+            if ([bool]$CopyTempThenReplace) {
+                $tmp = [System.IO.Path]::Combine($destDir, (".{0}.mqtmp-{1}" -f [System.IO.Path]::GetFileName($Destination), [guid]::NewGuid().ToString("N")))
+                $target = $tmp
+            }
+            $total = [int64]$sourceItem.Length
+            $copied = [int64]0
+            $started = [datetime]::UtcNow
+            $SharedProgress[$JobId] = @{ Status="COPYING"; Copied=$copied; Total=$total; StartedAt=$started }
+            $inputStream = $null
+            $outputStream = $null
+            try {
+                $inputStream = New-Object System.IO.FileStream($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, 1048576, [System.IO.FileOptions]::SequentialScan)
+                $outputStream = New-Object System.IO.FileStream($target, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 1048576, [System.IO.FileOptions]::SequentialScan)
+                $buffer = New-Object byte[] 1048576
+                while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $outputStream.Write($buffer, 0, $read)
+                    $copied += [int64]$read
+                    $SharedProgress[$JobId] = @{ Status="COPYING"; Copied=$copied; Total=$total; StartedAt=$started }
+                }
+                $outputStream.Flush()
+            } finally {
+                if ($null -ne $outputStream) { $outputStream.Dispose() }
+                if ($null -ne $inputStream) { $inputStream.Dispose() }
+            }
+            if ([bool]$PreserveModifiedTime) { [System.IO.File]::SetLastWriteTimeUtc($target, $sourceItem.LastWriteTimeUtc) }
+            if ([bool]$CopyAttributes) { [System.IO.File]::SetAttributes($target, $sourceItem.Attributes) }
+            if ([bool]$CopyTempThenReplace) {
+                if ($MissingOnly) {
+                    # Move without overwrite closes the missing-only race.
+                    [IO.File]::Move($tmp,$Destination); $tmp=$null
+                } elseif ([System.IO.File]::Exists($Destination)) {
+                    $attrs = [System.IO.File]::GetAttributes($Destination)
+                    if (($attrs -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                        [System.IO.File]::SetAttributes($Destination, ($attrs -band (-bnot [System.IO.FileAttributes]::ReadOnly)))
+                    }
+                    $backup = [System.IO.Path]::Combine($destDir, (".{0}.mqbackup-{1}" -f [System.IO.Path]::GetFileName($Destination), [guid]::NewGuid().ToString("N")))
+                    [System.IO.File]::Replace($tmp, $Destination, $backup)
+                    try { if ([System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) } } catch {}
+                    if (-not [System.IO.File]::Exists($backup)) { $backup = $null }
+                    $tmp = $null
+                } else {
+                    [System.IO.File]::Move($tmp, $Destination)
+                    $tmp = $null
+                }
+            }
+            return [pscustomobject]@{ Pair=$Entry.PairName; Action="COPY"; Path=$Entry.RelPath; Status="OK"; Message=""; BytesCopied=$copied; TotalBytes=$total }
+        } catch {
+            return [pscustomobject]@{ Pair=$Entry.PairName; Action="COPY"; Path=$Entry.RelPath; Status="FAILED"; Message=$_.Exception.Message }
+        } finally {
+            if (-not [string]::IsNullOrWhiteSpace($tmp) -and [System.IO.File]::Exists($tmp)) {
+                try { [System.IO.File]::SetAttributes($tmp, [System.IO.FileAttributes]::Normal); [System.IO.File]::Delete($tmp) } catch {}
+            }
+            if (-not [string]::IsNullOrWhiteSpace($backup) -and [System.IO.File]::Exists($backup)) {
+                try { [System.IO.File]::SetAttributes($backup, [System.IO.FileAttributes]::Normal); [System.IO.File]::Delete($backup) } catch {}
+            }
+        }
+    }
+
+    $pool = [runspacefactory]::CreateRunspacePool(1, $maxParallel)
+    $jobs = New-Object System.Collections.Generic.List[object]
+    try {
+        $pool.Open()
+        while ($readyGroupKeys.Count -gt 0 -or $jobs.Count -gt 0) {
+            while ($jobs.Count -lt $maxParallel -and $readyGroupKeys.Count -gt 0) {
+                $groupKey = [string]$readyGroupKeys.Dequeue()
+                $entry = $pendingGroups[$groupKey].Dequeue()
+                $pair = if ($null -ne $PairOverride) { $PairOverride } else { Find-PairByName ([string]$entry.PairName) }
+                $entryKey = Get-QueueEntryKey $entry
+                $rowIndex = if ($EntryIndexes.ContainsKey($entryKey)) { [int]$EntryIndexes[$entryKey] } else { -1 }
+                $item = [pscustomobject]@{
+                    Id = [guid]::NewGuid().ToString("N")
+                    Entry = $entry
+                    Source = Join-PathSafe ([string]$pair.Source) ([string]$entry.RelPath)
+                    Destination = Join-PathSafe (Resolve-DestinationPath ([string]$pair.Dest)) ([string]$entry.RelPath)
+                    RowIndex = $rowIndex
+                    GroupKey = $groupKey
+                }
+                $ps = [powershell]::Create()
+                $ps.RunspacePool = $pool
+                [void]$ps.AddScript($workerScript.ToString())
+                [void]$ps.AddArgument($item.Id)
+                [void]$ps.AddArgument($item.Entry)
+                [void]$ps.AddArgument($item.Source)
+                [void]$ps.AddArgument($item.Destination)
+                [void]$ps.AddArgument([bool]($script:Config.CopyTempThenReplace -or $MissingOnly))
+                [void]$ps.AddArgument([bool]$script:Config.PreserveModifiedTime)
+                [void]$ps.AddArgument([bool]$script:Config.CopyAttributes)
+                [void]$ps.AddArgument([double]$script:Config.TimeToleranceSeconds)
+                [void]$ps.AddArgument($progressState)
+                [void]$ps.AddArgument([bool]$MissingOnly)
+                try {
+                    $handle = $ps.BeginInvoke()
+                    $jobs.Add([pscustomobject]@{ Item=$item; PowerShell=$ps; Handle=$handle }) | Out-Null
+                    if ($jobs.Count -gt $script:LastParallelFileTransferPeakHandles) {
+                        $script:LastParallelFileTransferPeakHandles = $jobs.Count
+                    }
+                } catch {
+                    $ps.Dispose()
+                    $result = [pscustomobject]@{ Pair=$item.Entry.PairName; Action="COPY"; Path=$item.Entry.RelPath; Status="FAILED"; Message=(Format-ErrorSummary $_.Exception.Message) }
+                    $completed.Add([pscustomobject]@{ Entry=$item.Entry; Result=$result }) | Out-Null
+                    Update-ApplyProgressRow -Table $ProgressTable -Index $item.RowIndex -Status "FAILED" -Complete -ForceRender
+                    if ($pendingGroups[$groupKey].Count -gt 0) { $readyGroupKeys.Enqueue($groupKey) }
+                }
+            }
+
+            foreach ($job in @($jobs.ToArray())) {
+                $state = if ($progressState.ContainsKey($job.Item.Id)) { $progressState[$job.Item.Id] } else { $null }
+                if ($null -ne $state) {
+                    Update-ApplyProgressRow -Table $ProgressTable -Index $job.Item.RowIndex -Status ([string]$state.Status) -CopiedBytes ([int64]$state.Copied) -TotalBytes ([int64]$state.Total) -StartedAt ([datetime]$state.StartedAt)
+                }
+                if (-not $job.Handle.IsCompleted) { continue }
+                try {
+                    $output = @($job.PowerShell.EndInvoke($job.Handle))
+                    $result = if ($output.Count -gt 0) { $output[-1] } else { $null }
+                    if ($null -eq $result) { throw "Parallel copy worker returned no result" }
+                    if ($result.Status -eq "FAILED") { Write-Log "ERROR" ("File transfer failed: " + $job.Item.Entry.RelPath + " :: " + $result.Message); $result.Message = Format-ErrorSummary ([string]$result.Message) }
+                } catch {
+                    $result = [pscustomobject]@{ Pair=$job.Item.Entry.PairName; Action="COPY"; Path=$job.Item.Entry.RelPath; Status="FAILED"; Message=(Format-ErrorSummary $_.Exception.Message) }
+                } finally {
+                    $job.PowerShell.Dispose()
+                }
+                $completed.Add([pscustomobject]@{ Entry=$job.Item.Entry; Result=$result }) | Out-Null
+                $finalStatus = Get-ApplyProgressFinalStatus $result
+                $finalTotal = if ($null -ne $result.PSObject.Properties["TotalBytes"]) { [int64]$result.TotalBytes } else { Get-ApplyEntryTotalBytes $job.Item.Entry }
+                $finalCopied = if ($null -ne $result.PSObject.Properties["BytesCopied"]) { [int64]$result.BytesCopied } else { [int64]0 }
+                Update-ApplyProgressRow -Table $ProgressTable -Index $job.Item.RowIndex -Status $finalStatus -CopiedBytes $finalCopied -TotalBytes $finalTotal -Complete -ForceRender
+                [void]$jobs.Remove($job)
+                $progressState.Remove($job.Item.Id)
+                if ($pendingGroups[$job.Item.GroupKey].Count -gt 0) { $readyGroupKeys.Enqueue($job.Item.GroupKey) }
+            }
+            if ($jobs.Count -gt 0) { Start-Sleep -Milliseconds 100 }
+        }
+    } finally {
+        foreach ($job in @($jobs.ToArray())) {
+            try { $job.PowerShell.Stop() } catch {}
+            try { $job.PowerShell.Dispose() } catch {}
+        }
+        try { $pool.Close() } catch {}
+        try { $pool.Dispose() } catch {}
+    }
+    return @($completed.ToArray())
+}
+
+function Invoke-ApplyPending {
+    param([switch]$Quiet, [object]$Snapshot = $null)
+    if (-not (Enter-ApplyLock -Operation "Apply Pending" -Quiet:$Quiet)) { return }
+    try {
+        $Snapshot = Sync-PendingSessionSnapshot -RefreshDestinations -ShowProgress:(-not $Quiet)
+        $latest = @($Snapshot.Entries)
+        if ($latest.Count -eq 0) {
+            if (-not $Quiet) {
+                Show-Header "Apply Pending" "No queued changes"
+                Write-Color "Queue is empty." "Green"
+                Wait-Back
+            }
+            return
+        }
+        Show-Header "Apply Pending" "Recorded source changes only"
+        $plan = Get-ApplyExecutionPlan $latest
+        if ($plan.RawCount -ne @($plan.DisplayEntries).Count) {
+            Write-Color ("  {0} queued changes grouped into {1} transfer jobs" -f $plan.RawCount, @($plan.DisplayEntries).Count) "DarkGray"
+        }
+        $results = New-Object System.Collections.Generic.List[object]
+        $okKeys = New-Object System.Collections.Generic.List[string]
+        $pairOnline = $Snapshot.PairOnline
+        $entryIndexes = @{}
+        for ($i = 0; $i -lt @($plan.DisplayEntries).Count; $i++) {
+            $entryIndexes[(Get-QueueEntryKey $plan.DisplayEntries[$i])] = $i
+        }
+        $cursorChanged = $false
+        $previousCursorVisible = $true
+        try {
+            try {
+                if (-not [Console]::IsOutputRedirected) {
+                    $previousCursorVisible = [Console]::CursorVisible
+                    [Console]::CursorVisible = $false
+                    $cursorChanged = $true
+                }
+            } catch {}
+
+            $progressTable = New-ApplyProgressTable -Entries @($plan.DisplayEntries)
+            foreach ($entry in @($plan.Deletes)) {
+                $key = Get-QueueEntryKey $entry
+                $rowIndex = [int]$entryIndexes[$key]
+                $startedAt = Get-Date
+                Update-ApplyProgressRow -Table $progressTable -Index $rowIndex -Status (Get-ApplyProgressStartingStatus $entry) -StartedAt $startedAt -ForceRender
+                $pairKey = ([string]$entry.PairName).ToUpperInvariant()
+                $online = ($pairOnline.ContainsKey($pairKey) -and [bool]$pairOnline[$pairKey])
+                $result = Apply-OneEntry -Entry $entry -DestinationOnline $online
+                Update-ApplyProgressRow -Table $progressTable -Index $rowIndex -Status (Get-ApplyProgressFinalStatus $result) -Complete -ForceRender
+                $results.Add($result) | Out-Null
+                $retain = ($null -ne $result.PSObject.Properties["RetainPending"] -and [bool]$result.RetainPending)
+                if ($result.Status -ne "FAILED" -and $result.Message -ne "Destination drive offline" -and -not $retain) {
+                    $okKeys.Add($key) | Out-Null
+                }
+            }
+
+            foreach ($directoryJob in @($plan.DirectoryJobs)) {
+                $root = $directoryJob.Root
+                $rowIndex = [int]$entryIndexes[(Get-QueueEntryKey $root)]
+                $startedAt = Get-Date
+                Update-ApplyProgressRow -Table $progressTable -Index $rowIndex -Status "COPYING" -StartedAt $startedAt -ForceRender
+                $pairKey = ([string]$root.PairName).ToUpperInvariant()
+                $online = ($pairOnline.ContainsKey($pairKey) -and [bool]$pairOnline[$pairKey])
+                $outcome = Invoke-NewDirectoryTreeCopy -Job $directoryJob -DestinationOnline $online
+                $finalStatus = Get-ApplyProgressFinalStatus $outcome.AggregateResult
+                $treeTotalBytes = Get-ApplyEntryTotalBytes $root
+                $treeCopiedBytes = if ($finalStatus -eq "DONE") {
+                    $treeTotalBytes
+                } elseif ($null -ne $outcome.AggregateResult.PSObject.Properties["BytesCopied"]) {
+                    [int64]$outcome.AggregateResult.BytesCopied
+                } else {
+                    [int64]0
+                }
+                Update-ApplyProgressRow -Table $progressTable -Index $rowIndex -Status $finalStatus -CopiedBytes $treeCopiedBytes -TotalBytes $treeTotalBytes -Complete -ForceRender
+                foreach ($record in @($outcome.Results)) {
+                    $results.Add($record.Result) | Out-Null
+                }
+                foreach ($successKey in @($outcome.SuccessfulKeys)) { $okKeys.Add([string]$successKey) | Out-Null }
+            }
+
+            $fileRecords = @(Invoke-ParallelFileTransfers -Entries @($plan.Files) -PairOnline $pairOnline -ProgressTable $progressTable -EntryIndexes $entryIndexes)
+            foreach ($record in $fileRecords) {
+                $entry = $record.Entry
+                $result = $record.Result
+                $results.Add($result) | Out-Null
+                $retain = ($null -ne $result.PSObject.Properties["RetainPending"] -and [bool]$result.RetainPending)
+                if ($result.Status -ne "FAILED" -and $result.Message -ne "Destination drive offline" -and -not $retain) {
+                    $okKeys.Add((Get-QueueEntryKey $entry)) | Out-Null
+                }
+            }
+            Remove-AppliedQueueEntries -AttemptedEntries $latest -SuccessfulKeys @($okKeys.ToArray()) | Out-Null
+        } finally {
+            if ($cursorChanged) {
+                try { [Console]::CursorVisible = $previousCursorVisible } catch {}
+            }
+        }
+        Show-ApplyResults -Results @($results.ToArray()) -Title "Apply Results" -Compact
+        $script:PendingSessionSnapshot = $null
+    } finally {
+        $script:PendingSessionSnapshot = $null
+        Exit-ApplyLock
+    }
 }
 
 function Show-PendingPreview {
-    $entries = @(Read-QueueEntries)
-    $latest = @(Get-LatestQueueEntries $entries)
-    $latest = @(Remove-OrphanedUpserts $latest)
-    Show-Header "Preview Pending" "Enter = apply   Esc = back"
+    param([object]$Snapshot = $null)
+    if ($null -eq $Snapshot) { $Snapshot = Sync-PendingSessionSnapshot -RefreshDestinations -ShowProgress -ReadOnly }
+    $latest = @($Snapshot.Entries)
     if ($latest.Count -eq 0) {
+        Show-Header "Preview Pending" "Local pending decisions"
         Write-Color "No pending changes found." "Green"
         Wait-Back
         return
     }
-    $visible = @(Get-VisiblePendingEntries $latest)
-    if ($visible.Count -eq 0) {
-        Write-Color "No destination changes were needed." "Green"
-        Write-Color "Applying will clear these already-satisfied records from the queue." "DarkGray"
+    $plan = Get-ApplyExecutionPlan $latest
+    $previewItems = @($plan.DisplayEntries)
+    $pageSize = 100
+    $pageCount = [math]::Max(1, [math]::Ceiling($previewItems.Count / [double]$pageSize))
+    $page = 0
+    while ($true) {
+        Show-Header "Preview Pending" "Read-only preview - apply rechecks current paths"
+        Write-Color ("Changes: {0}    Transfer jobs: {1}    Add: {2}    Update: {3}    Delete: {4}" -f $latest.Count, $previewItems.Count, @($latest | Where-Object Operation -eq "Add").Count, @($latest | Where-Object Operation -eq "Update").Count, @($latest | Where-Object Operation -eq "Delete").Count) "Cyan"
+        $pairSummary = @($latest | Group-Object PairName | Sort-Object Count -Descending)
+        Write-Color ("By pair: " + (@($pairSummary | Select-Object -First 8 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join "  ")) "DarkGray"
         Write-Host ""
-        $ok = Read-EnterOrEsc "Clear these recorded no-op changes now?"
-        if ($ok) { Invoke-ApplyPending }
-        return
+        $start = $page * $pageSize
+        $end = [math]::Min($previewItems.Count - 1, $start + $pageSize - 1)
+        Write-PendingTable -Items @($previewItems[$start..$end]) -StartIndex $start -TotalCount $previewItems.Count
+        Write-Host ""
+        Write-Color ("Page {0}/{1}    N = next    P = previous    Enter = apply    Esc = back" -f ($page + 1), $pageCount) "DarkGray"
+        if ($script:SuppressPause) { return }
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq [ConsoleKey]::Escape) { return }
+        if ($key.Key -eq [ConsoleKey]::Enter) { Invoke-ApplyPending -Snapshot $Snapshot; return }
+        if ($key.Key -eq [ConsoleKey]::N -and $page -lt ($pageCount - 1)) { $page++; continue }
+        if ($key.Key -eq [ConsoleKey]::P -and $page -gt 0) { $page--; continue }
     }
-    Write-PendingTable $visible
-    Write-Host ""
-    $allOffline = (@($visible | Where-Object { (Get-DisplayAction $_) -ne "OFFLINE" }).Count -eq 0)
-    if ($allOffline) {
-        Write-Color "All pending entries are offline. Destination drive is not available." "Yellow"
-        Wait-Back
-        return
-    }
-    $ok = Read-EnterOrEsc "Apply these recorded changes now?"
-    if ($ok) { Invoke-ApplyPending }
 }
 
 function Get-DisplayAction {
     param([object]$Entry)
-    if ($Entry.Action -eq "Delete") { return "DELETE" }
-    $pair = Find-PairByName $Entry.PairName
-    if ($null -eq $pair) { return "NEW" }
-    if (-not (Test-DestRootAvailable $pair.Dest)) { return "OFFLINE" }
-    $dest = Resolve-DestinationPath (Join-PathSafe $pair.Dest $Entry.RelPath)
-    if ([string]::IsNullOrWhiteSpace($dest)) { return "N/A" }
-    if (Test-Path -LiteralPath $dest -ErrorAction SilentlyContinue) { return "UPDATE" }
-    return "NEW"
-}
-
-function Test-PendingPreviewEntryVisible {
-    param([object]$Entry)
-    if ($null -eq $Entry) { return $false }
-    if ($Entry.Action -eq "Delete") {
-        $dest = Get-QueueEntryDestinationPath $Entry
-        if (-not [string]::IsNullOrWhiteSpace($dest) -and -not (Test-Path -LiteralPath $dest -ErrorAction SilentlyContinue)) { return $false }
-    }
-    $action = Get-DisplayAction $Entry
-    if ($action -eq "OFFLINE" -or $action -eq "N/A") { return $true }
-    if ([bool]$Entry.IsDirectory -and $action -eq "UPDATE") { return $false }
-    return $true
-}
-
-function Get-QueueEntryDestinationPath {
-    param([object]$Entry)
-    if ($null -eq $Entry) { return $null }
-    $pair = Find-PairByName $Entry.PairName
-    if ($null -ne $pair) {
-        $p = Join-PathSafe $pair.Dest $Entry.RelPath
-        if (-not [string]::IsNullOrWhiteSpace($p)) { return (Resolve-DestinationPath $p) }
-    }
-    if (-not [string]::IsNullOrWhiteSpace([string]$Entry.Dest)) { return [string]$Entry.Dest }
-    return $null
-}
-
-function Get-VisiblePendingEntries {
-    param([object[]]$Entries)
-    return @($Entries | Where-Object { Test-PendingPreviewEntryVisible $_ })
+    if ($Entry.Action -eq "Delete" -or [string]$Entry.Operation -eq "Delete") { return "DELETE" }
+    if ([string]$Entry.Operation -eq "Add" -or [string]$Entry.BaselineState -eq "Absent") { return "ADD" }
+    return "UPDATE"
 }
 
 function Test-ApplyResultVisible {
@@ -1700,19 +3511,21 @@ function Test-ApplyResultVisible {
 }
 
 function Write-PendingTable {
-    param([object[]]$Items)
-    $wPair = 22; $wAction = 8; $wKind = 6; $wPath = 48
-    $line = "+" + ("-"*8) + "+" + ("-"*($wPair+2)) + "+" + ("-"*($wAction+2)) + "+" + ("-"*($wKind+2)) + "+" + ("-"*($wPath+2)) + "+"
+    param([object[]]$Items, [int]$StartIndex = 0, [int]$TotalCount = 0)
+    if ($TotalCount -le 0) { $TotalCount = @($Items).Count }
+    $wNo = 11; $wPair = 22; $wAction = 8; $wKind = 6; $wPath = 48
+    $line = "+" + ("-"*($wNo+2)) + "+" + ("-"*($wPair+2)) + "+" + ("-"*($wAction+2)) + "+" + ("-"*($wKind+2)) + "+" + ("-"*($wPath+2)) + "+"
     Write-Color $line "DarkGray"
-    Write-Color ("| {0} | {1} | {2} | {3} | {4} |" -f (Center-Text "No." 6),(Center-Text "Pair" $wPair),(Center-Text "Action" $wAction),(Center-Text "Kind" $wKind),(Center-Text "Path" $wPath)) "DarkGray"
+    Write-Color ("| {0} | {1} | {2} | {3} | {4} |" -f (Center-Text "No." $wNo),(Center-Text "Pair" $wPair),(Center-Text "Action" $wAction),(Center-Text "Kind" $wKind),(Center-Text "Path" $wPath)) "DarkGray"
     Write-Color $line "DarkGray"
     for ($i = 0; $i -lt $Items.Count; $i++) {
         $e = $Items[$i]
-        $kind = if ($e.IsDirectory) { "DIR" } else { "FILE" }
+        $coveredCount = if ($null -ne $e.PSObject.Properties["CoveredCount"]) { [int]$e.CoveredCount } else { 0 }
+        $kind = if ($coveredCount -gt 1) { "TREE" } elseif ($e.IsDirectory) { "DIR" } else { "FILE" }
         $action = Get-DisplayAction $e
-        $color = if ($action -eq "DELETE") { "Red" } elseif ($action -eq "NEW") { "Green" } elseif ($action -eq "OFFLINE") { "DarkRed" } else { "Yellow" }
+        $color = if ($action -eq "DELETE") { "Red" } elseif ($action -eq "ADD") { "Green" } else { "Yellow" }
         Write-Color "| " "DarkGray" -NoNewLine
-        Write-Color (Center-Text ("{0:00}/{1:00}" -f ($i+1), $Items.Count) 6) "DarkGray" -NoNewLine
+        Write-Color (Center-Text ("{0}/{1}" -f ($StartIndex + $i + 1), $TotalCount) $wNo) "DarkGray" -NoNewLine
         Write-Color " | " "DarkGray" -NoNewLine
         Write-Color (Fit-Cell $e.PairName $wPair) "Cyan" -NoNewLine
         Write-Color " | " "DarkGray" -NoNewLine
@@ -1720,7 +3533,8 @@ function Write-PendingTable {
         Write-Color " | " "DarkGray" -NoNewLine
         Write-Color (Center-Text $kind $wKind) "White" -NoNewLine
         Write-Color " | " "DarkGray" -NoNewLine
-        Write-Color (Fit-Cell $e.RelPath $wPath) "White" -NoNewLine
+        $pathText = if ($coveredCount -gt 1) { "{0} [{1} items]" -f [string]$e.RelPath, $coveredCount } else { [string]$e.RelPath }
+        Write-Color (Fit-Cell $pathText $wPath) "White" -NoNewLine
         Write-Color " |" "DarkGray"
     }
     Write-Color $line "DarkGray"
@@ -1730,7 +3544,7 @@ function Show-ApplyResults {
     param([object[]]$Results, [string]$Title, [switch]$Compact)
     Show-Header $Title "Press any key after review"
     $visibleResults = @($Results | Where-Object { Test-ApplyResultVisible $_ })
-    if ($visibleResults.Count -eq 0) {
+    if ($visibleResults.Count -eq 0 -and -not $Compact) {
         Write-Color "No destination changes were needed." "Green"
         Wait-Back
         return
@@ -1761,9 +3575,13 @@ function Show-ApplyResults {
     }
 
     $copied = @($Results | Where-Object { $_.Action -eq "COPY" -and $_.Status -eq "OK" }).Count
+    $copied += [int](($Results | Where-Object { $_.Action -eq "COPYTREE" -and $_.Status -eq "OK" -and $null -ne $_.PSObject.Properties["TreeFiles"] } | Measure-Object TreeFiles -Sum).Sum)
     $folders = @($Results | Where-Object { $_.Action -eq "MKDIR" -and $_.Status -eq "OK" }).Count
+    $folders += [int](($Results | Where-Object { $_.Action -eq "COPYTREE" -and $_.Status -eq "OK" -and $null -ne $_.PSObject.Properties["TreeDirs"] } | Measure-Object TreeDirs -Sum).Sum)
     $deleted = @($Results | Where-Object { $_.Action -eq "DELETE" -and $_.Status -eq "OK" }).Count
     $skipped = @($Results | Where-Object { $_.Status -eq "SKIPPED" }).Count
+    $obsoleteDeletes = @($Results | Where-Object { $_.Action -eq "DELETE" -and $_.Status -eq "SKIPPED" -and $_.Message -eq "Destination missing" }).Count
+    $canceledDeletes = @($Results | Where-Object { $_.Action -eq "DELETE" -and $_.Status -eq "SKIPPED" -and $null -ne $_.PSObject.Properties["ResultKind"] -and [string]$_.ResultKind -eq "DeleteCanceled" }).Count
     $failed = @($Results | Where-Object { $_.Status -eq "FAILED" }).Count
     $total = @($Results).Count
 
@@ -1772,16 +3590,22 @@ function Show-ApplyResults {
     Write-Color ("Folders created : " + $folders) "Green"
     Write-Color ("Deleted         : " + $deleted) "Yellow"
     Write-Color ("Skipped         : " + $skipped) $(if ($skipped -gt 0) { "Yellow" } else { "DarkGray" })
+    Write-Color ("Obsolete deletes: " + $obsoleteDeletes) "DarkGray"
+    Write-Color ("Deletes canceled: " + $canceledDeletes) $(if ($canceledDeletes -gt 0) { "Cyan" } else { "DarkGray" })
     Write-Color ("Failed          : " + $failed) $(if ($failed -gt 0) { "Red" } else { "DarkGray" })
     Write-Host ""
 
     $detailResults = @($Results | Where-Object {
         if ($_.Status -eq "FAILED") { return $true }
-        if ($_.Status -eq "SKIPPED" -and $_.Message -ne "Already current" -and $_.Message -ne "Directory exists" -and $_.Message -ne "Destination missing") { return $true }
+        if ($_.Status -eq "SKIPPED" -and $_.Message -ne "Already current" -and $_.Message -ne "Directory exists" -and $_.Message -ne "Destination missing" -and -not ($null -ne $_.PSObject.Properties["ResultKind"] -and [string]$_.ResultKind -eq "DeleteCanceled")) { return $true }
         return $false
     })
     if ($detailResults.Count -eq 0) {
-        if ($failed -eq 0) { Write-Color "All pending changes applied successfully." "Green" }
+        if ($canceledDeletes -gt 0) {
+            Write-Color "Pending deletions were retained for reclassification." "Cyan"
+        } elseif ($failed -eq 0) {
+            Write-Color "All pending changes applied successfully." "Green"
+        }
         Wait-Back
         return
     }
@@ -1810,408 +3634,140 @@ function Show-ApplyResults {
     Wait-Back
 }
 
-function Build-RobocopyArgs {
-    param(
-        [object]$Pair,
-        [bool]$Preview,
-        [ValidateSet("STRICT","UPDATE_KEEP_EXTRAS","MISSING_ONLY")]
-        [string]$Policy
-    )
-    $dest = Resolve-DestinationPath $Pair.Dest
-    $args = @(
-        $Pair.Source,
-        $dest
-    )
-    if ($Policy -eq "STRICT") {
-        if ($Preview) {
-            $args += "/E"
-        } else {
-            $args += "/MIR"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function New-InternalMirrorScanResult {
+    param([object[]]$FileChanges)
+    $changes = @($FileChanges)
+    $newFiles = @($changes | Where-Object { $_.Action -eq "COPY" -and $_.Type -eq "FILE" -and $_.ChangeAction -eq "NEW" }).Count
+    $updatedFiles = @($changes | Where-Object { $_.Action -eq "COPY" -and $_.Type -eq "FILE" -and $_.ChangeAction -eq "UPDATE" }).Count
+    $extraFiles = @($changes | Where-Object { $_.Action -eq "DELETE" -and $_.Type -eq "FILE" }).Count
+    $newDirs = @($changes | Where-Object { $_.Action -eq "MKDIR" -and $_.Type -eq "DIR" }).Count
+    $extraDirs = @($changes | Where-Object { $_.Action -eq "DELETE" -and $_.Type -eq "DIR" }).Count
+    $detail = @($changes | ForEach-Object {
+        $prefix = switch ($_.ChangeAction) {
+            "NEW" { if ($_.Type -eq "DIR") { "New folder: " } else { "New file: " } }
+            "UPDATE" { "Update file: " }
+            "DELETE" { if ($_.Type -eq "DIR") { "Extra folder: " } else { "Extra file: " } }
+            "CLEANUP" { "Cleanup temp file: " }
+            default { "Change: " }
         }
-    } elseif ($Policy -eq "UPDATE_KEEP_EXTRAS") {
-        $args += "/E"
-    } else {
-        $args += @("/E", "/XC", "/XN", "/XO", "/XX")
-    }
-    $args += @(
-        "/FFT",
-        "/Z",
-        ("/MT:{0}" -f [int]$script:Config.RobocopyThreads),
-        ("/R:{0}" -f [int]$script:Config.RobocopyRetries),
-        ("/W:{0}" -f [int]$script:Config.RobocopyWaitSeconds),
-        "/COPY:DAT",
-        "/DCOPY:DA",
-        "/XJ",
-        "/NP"
-    )
-    if ($Preview) { $args += "/L" }
-    $excludeDirs = @()
-    $excludeDirs += @(Get-Array $script:Config.GlobalExcludeDirs)
-    $excludeDirs += @(Get-MapArray "PairExcludeDirs" $Pair.Name)
-    $excludeFiles = @()
-    $excludeFiles += @(Get-Array $script:Config.GlobalExcludeFiles)
-    $excludeFiles += @(Get-MapArray "PairExcludeFiles" $Pair.Name)
-    if ($Preview) {
-        $excludeFiles = @($excludeFiles | Where-Object { [string]$_ -ine "*.mbtmp-*" })
-    }
-    if ($excludeDirs.Count -gt 0) { $args += "/XD"; $args += $excludeDirs }
-    if ($excludeFiles.Count -gt 0) { $args += "/XF"; $args += $excludeFiles }
-    return $args
-}
-
-function Decode-RobocopyExit {
-    param([int]$Code)
-    if ($Code -eq 0) { return "MATCHED" }
-    if ($Code -ge 16) { return "ERROR" }
-    if (($Code -band 8) -ne 0) { return "ERROR" }
-    return "CHANGED"
-}
-
-function Get-RobocopySummary {
-    param([object[]]$Output)
-    $summary = [ordered]@{
-        DirsTotal = 0; DirsCopied = 0; DirsSkipped = 0; DirsMismatch = 0; DirsFailed = 0; DirsExtras = 0
-        FilesTotal = 0; FilesCopied = 0; FilesSkipped = 0; FilesMismatch = 0; FilesFailed = 0; FilesExtras = 0
-    }
-
-    foreach ($lineObj in @($Output)) {
-        $line = [string]$lineObj
-        if ($line -notmatch '^\s*(Dirs|Files)\s*:\s*(.+)$') { continue }
-
-        $kind = $Matches[1]
-        $numbers = @([regex]::Matches($Matches[2], '\d[\d,]*') | ForEach-Object {
-            [int64](($_.Value) -replace ',', '')
-        })
-        if ($numbers.Count -lt 6) { continue }
-
-        $prefix = if ($kind -eq "Dirs") { "Dirs" } else { "Files" }
-        $summary["${prefix}Total"] = $numbers[0]
-        $summary["${prefix}Copied"] = $numbers[1]
-        $summary["${prefix}Skipped"] = $numbers[2]
-        $summary["${prefix}Mismatch"] = $numbers[3]
-        $summary["${prefix}Failed"] = $numbers[4]
-        $summary["${prefix}Extras"] = $numbers[5]
-    }
-
-    return [pscustomobject]$summary
-}
-
-function Get-RobocopyChangeSummary {
-    param([object[]]$Output)
-    $newFiles = 0
-    $updatedFiles = 0
-    $extraFiles = 0
-    $newDirs = 0
-    $extraDirs = 0
-
-    foreach ($lineObj in @($Output)) {
-        $line = [string]$lineObj
-        if ($line -match '^\s*New File') { $newFiles++; continue }
-        if ($line -match '^\s*(Newer|Older|Changed)') { $updatedFiles++; continue }
-        if ($line -match '^\s*\*EXTRA File') { $extraFiles++; continue }
-        if ($line -match '^\s*New Dir') { $newDirs++; continue }
-        if ($line -match '^\s*\*EXTRA Dir') { $extraDirs++; continue }
-    }
-
+        $text = $prefix + [string]$_.RelPath
+        if ($text.Length -gt 92) { $text = $text.Substring(0, 92) + "..." }
+        $text
+    })
     return [pscustomobject]@{
-        NewFiles = $newFiles
-        UpdatedFiles = $updatedFiles
-        ExtraFiles = $extraFiles
-        NewDirs = $newDirs
-        ExtraDirs = $extraDirs
-    }
-}
-
-function Test-RobocopyChangeLine {
-    param([string]$Line)
-    if ([string]::IsNullOrWhiteSpace($Line)) { return $false }
-    return ($Line -match '^\s*(New File|New Dir|Newer|Older|Changed|\*EXTRA)')
-}
-
-function Get-RobocopyChangeText {
-    param([string]$Line)
-    $text = ([string]$Line).Trim()
-    $text = [regex]::Replace($text, '\s+', ' ')
-
-    $path = ""
-    $pathMatch = [regex]::Match($text, '([A-Za-z]:\\.*|\\\\.*)$')
-    if ($pathMatch.Success) { $path = $pathMatch.Groups[1].Value.Trim() }
-
-    if ($text -match '^\*EXTRA Dir') {
-        $text = "Extra folder: " + $(if ($path) { $path } else { ($text -replace '^\*EXTRA Dir\s+-?\d+\s+', '') })
-    } elseif ($text -match '^\*EXTRA File') {
-        $text = "Extra file: " + $(if ($path) { $path } else { ($text -replace '^\*EXTRA File\s+(.+?\s+)?', '') })
-    } elseif ($text -match '^New Dir') {
-        $text = "New folder: " + $(if ($path) { $path } else { ($text -replace '^New Dir\s+\d+\s+', '') })
-    } elseif ($text -match '^New File') {
-        $text = "New file: " + $(if ($path) { $path } else { ($text -replace '^New File\s+(.+?\s+)?', '') })
-    } elseif ($text -match '^(Newer|Older|Changed)') {
-        $text = "Update file: " + $(if ($path) { $path } else { ($text -replace '^(Newer|Older|Changed)\s+(.+?\s+)?', '') })
-    }
-
-    if ($text.Length -gt 92) { $text = $text.Substring(0, 92) + "..." }
-    return $text
-}
-
-function Convert-RobocopyLineToChange {
-    param([string]$Line, [string]$SourceRoot, [string]$DestRoot)
-    $line = $Line.Trim()
-    $action = $null; $type = $null; $changeAction = $null
-    if ($line -match '^New\s+File\s+') { $action = "COPY"; $type = "FILE"; $changeAction = "NEW" }
-    elseif ($line -match '^New\s+Dir\s+') { $action = "MKDIR"; $type = "DIR"; $changeAction = "NEW" }
-    elseif ($line -match '^(Newer|Older|Changed)\s+') { $action = "COPY"; $type = "FILE"; $changeAction = "UPDATE" }
-    elseif ($line -match '^\*EXTRA\s+File\s+') { $action = "DELETE"; $type = "FILE"; $changeAction = "DELETE" }
-    elseif ($line -match '^\*EXTRA\s+Dir\s+') { $action = "DELETE"; $type = "DIR"; $changeAction = "DELETE" }
-    else { return $null }
-    $pathMatch = [regex]::Match($line, '([A-Za-z]:\\.*|\\\\.*)$')
-    $root = if ($action -eq "DELETE") { $DestRoot } else { $SourceRoot }
-    if ($pathMatch.Success) {
-        $fullPath = $pathMatch.Groups[1].Value.TrimEnd('\')
-        $relPath = Get-RelativePath $root $fullPath
-        if ([string]::IsNullOrWhiteSpace($relPath) -and $fullPath.Length -gt $root.Length) {
-            $relPath = $fullPath.Substring($root.Length).TrimStart('\')
+        FileChanges = $changes
+        Changes = $detail
+        HasChanges = ($changes.Count -gt 0)
+        ChangeSummary = [pscustomobject]@{
+            NewFiles = $newFiles
+            UpdatedFiles = $updatedFiles
+            ExtraFiles = $extraFiles
+            NewDirs = $newDirs
+            ExtraDirs = $extraDirs
         }
-    } else {
-        $relPath = ($line -replace '^\S+\s+\S+\s+', '').Trim()
-    }
-    if ([string]::IsNullOrWhiteSpace($relPath)) { return $null }
-    if ($action -eq "DELETE" -and $type -eq "FILE") {
-        $leaf = Split-Path -Path $relPath -Leaf
-        if (Test-InternalTempCleanupFileName $leaf) {
-            $tempPath = Join-PathSafe $DestRoot $relPath
-            if (-not (Test-TempCleanupFileEligible -FullPath $tempPath -DestRoot $DestRoot)) { return $null }
-            return [PSCustomObject]@{ Action = "CLEANUP"; Type = "FILE"; RelPath = $relPath; ChangeAction = "CLEANUP" }
+        Summary = [pscustomobject]@{
+            DirsTotal = 0; DirsCopied = $newDirs; DirsSkipped = 0; DirsMismatch = 0; DirsFailed = 0; DirsExtras = $extraDirs
+            FilesTotal = 0; FilesCopied = ($newFiles + $updatedFiles); FilesSkipped = 0; FilesMismatch = 0; FilesFailed = 0; FilesExtras = $extraFiles
         }
     }
-    return [PSCustomObject]@{ Action = $action; Type = $type; RelPath = $relPath; ChangeAction = $changeAction }
 }
-    
 
-function Write-ScanProgress {
-    param(
-        [int]$FrameIndex,
-        [string]$PairName,
-        [string]$Text,
-        [string]$Color = "Cyan"
-    )
-    $frames = @("/", "-", "\", "|")
-    $frame = $frames[$FrameIndex % $frames.Count]
-    $line = "{0} Scanning {1}: {2}" -f $frame, $PairName, $Text
-    try {
-        $width = [Console]::WindowWidth
-        if ($width -lt 40) { $width = 120 }
-        $max = $width - 1
-        if ($line.Length -gt $max) { $line = $line.Substring(0, $max) }
-        Write-Host -NoNewline ("`r" + $line.PadRight($max)) -ForegroundColor $Color
-    } catch {
-        Write-Host $line -ForegroundColor $Color
+function Get-InternalMirrorScan {
+    param([object]$Pair, [ValidateSet('STRICT','UPDATE_KEEP_EXTRAS','MISSING_ONLY')][string]$Policy, [scriptblock]$ProgressCallback = $null)
+    Assert-PairLayout $Pair
+    $srcRoot=[IO.Path]::GetFullPath($Pair.Source)
+    $dstRoot=[IO.Path]::GetFullPath((Resolve-DestinationPath $Pair.Dest))
+    $sourceProbe=Get-ExactPathProbe $srcRoot
+    if ($sourceProbe.State -ne 'Exists' -or -not $sourceProbe.IsDirectory) { throw 'Source root unavailable' }
+    $destProbe=Get-ExactPathProbe $dstRoot
+    if ($destProbe.State -eq 'Error' -or ($destProbe.State -eq 'Exists' -and -not $destProbe.IsDirectory) -or -not (Test-DestRootAvailable $dstRoot)) { throw 'Destination root unavailable or invalid' }
+    $sourceItems=@(Get-SafeTreeItems $srcRoot $Pair)
+    $destItems=if ($destProbe.State -eq 'Exists') { @(Get-SafeTreeItems $dstRoot $Pair -EquivalentRoot $srcRoot) } else { @() }
+    $sources=@{}; $destinations=@{}; $changes=[Collections.Generic.List[object]]::new()
+    foreach ($item in $sourceItems) { $sources[(Get-RelativePath $srcRoot $item.FullName)]=$item }
+    foreach ($item in $destItems) { $destinations[(Get-RelativePath $dstRoot $item.FullName)]=$item }
+    foreach ($rel in $sources.Keys) {
+        $item=$sources[$rel]; $target=$destinations[$rel]
+        if ($null -ne $target -and $item.PSIsContainer -ne $target.PSIsContainer) { throw "Source/destination type conflict: $rel" }
+        if ($null -eq $target) {
+            $changes.Add([pscustomobject]@{Action=$(if($item.PSIsContainer){'MKDIR'}else{'COPY'});Type=$(if($item.PSIsContainer){'DIR'}else{'FILE'});RelPath=$rel;ChangeAction='NEW'})
+        } elseif (-not $item.PSIsContainer -and $Policy -ne 'MISSING_ONLY' -and (Test-FileNeedsCopy $item.FullName $target.FullName $item)) {
+            $changes.Add([pscustomobject]@{Action='COPY';Type='FILE';RelPath=$rel;ChangeAction='UPDATE'})
+        }
     }
+    if ($Policy -eq 'STRICT') {
+        foreach ($rel in $destinations.Keys) {
+            if ($sources.ContainsKey($rel)) { continue }
+            $item=$destinations[$rel]
+            $changes.Add([pscustomobject]@{Action='DELETE';Type=$(if($item.PSIsContainer){'DIR'}else{'FILE'});RelPath=$rel;ChangeAction='DELETE'})
+        }
+    }
+    # A disconnect or permission error must fail the whole preview, not yield a partial plan.
+    if ((Get-ExactPathProbe $srcRoot).State -ne 'Exists' -or -not (Test-DestRootAvailable $dstRoot)) { throw 'Root became unavailable during scan' }
+    return New-InternalMirrorScanResult @($changes.ToArray() | Sort-Object RelPath,Action)
 }
+
+
+
 
 function ConvertTo-ProcessArgumentString {
     param([string[]]$Arguments)
-    $quoted = @()
-    foreach ($arg in $Arguments) {
-        $text = [string]$arg
-        if ($text -match '[\s"]') {
-            $text = '"' + ($text -replace '"', '\"') + '"'
-        }
-        $quoted += $text
+    $quoted = foreach ($argument in $Arguments) {
+        $text=[string]$argument
+        if ($text -notmatch '[\s"]' -and $text.Length -gt 0) { $text; continue }
+        $text=[regex]::Replace($text,'(\\*)"','$1$1\"')
+        $text=[regex]::Replace($text,'(\\+)$','$1$1')
+        '"'+$text+'"'
     }
     return ($quoted -join ' ')
 }
 
-function Clear-ScanProgress {
-    try {
-        $width = [Console]::WindowWidth
-        if ($width -lt 40) { $width = 120 }
-        Write-Host -NoNewline ("`r" + (" " * ($width - 1)) + "`r")
-    } catch {
-        Write-Host ""
-    }
-}
 
-function Invoke-RobocopyStreaming {
-    param(
-        [string[]]$RobocopyArgs,
-        [string]$PairName
-    )
-    $output = New-Object 'System.Collections.Generic.List[string]'
-    $frame = 0
-    $lastChange = "Reading Folders"
-    $shownChanges = 0
-    $maxShownChanges = 18
 
-    $queue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo.FileName = "robocopy.exe"
-    $proc.StartInfo.Arguments = ConvertTo-ProcessArgumentString $RobocopyArgs
-    $proc.StartInfo.UseShellExecute = $false
-    $proc.StartInfo.RedirectStandardOutput = $true
-    $proc.StartInfo.RedirectStandardError = $true
-    $proc.StartInfo.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(437)
-    $proc.StartInfo.CreateNoWindow = $true
-    $outSub = $null
-    $errSub = $null
 
-    try {
-        $outSub = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -MessageData $queue -Action {
-            if ($null -ne $EventArgs.Data) { $Event.MessageData.Enqueue([string]$EventArgs.Data) }
-        }
-        $errSub = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -MessageData $queue -Action {
-            if ($null -ne $EventArgs.Data) { $Event.MessageData.Enqueue([string]$EventArgs.Data) }
-        }
-
-        [void]$proc.Start()
-        $proc.BeginOutputReadLine()
-        $proc.BeginErrorReadLine()
-
-        while (-not $proc.HasExited -or $queue.Count -gt 0) {
-            $drained = $false
-            while ($queue.Count -gt 0) {
-                $drained = $true
-                $line = [string]$queue.Dequeue()
-                [void]$output.Add($line)
-                if (Test-RobocopyChangeLine $line) {
-                    $lastChange = Get-RobocopyChangeText $line
-                    $color = if ($line -match '^\s*\*EXTRA') { "DarkYellow" } elseif ($line -match '^\s*New Dir') { "Cyan" } else { "Yellow" }
-                    Write-ScanProgress -FrameIndex $frame -PairName $PairName -Text $lastChange -Color $color
-                    if ($shownChanges -lt $maxShownChanges) {
-                        Clear-ScanProgress
-                        Write-Color ("  -> " + $lastChange) $color
-                        $shownChanges++
-                    }
-                } else {
-                    Write-ScanProgress -FrameIndex $frame -PairName $PairName -Text $lastChange -Color "Cyan"
-                }
-                $frame++
-            }
-            if (-not $drained) {
-                Write-ScanProgress -FrameIndex $frame -PairName $PairName -Text $lastChange -Color "Cyan"
-                $frame++
-                Start-Sleep -Milliseconds 120
-            }
-        }
-        $proc.WaitForExit()
-        Start-Sleep -Milliseconds 300
-        while ($queue.Count -gt 0) {
-            $line = [string]$queue.Dequeue()
-            [void]$output.Add($line)
-        }
-        $code = [int]$proc.ExitCode
-    } catch {
-        [void]$output.Add($_.Exception.Message)
-        $code = 16
-    } finally {
-        if ($outSub) { Unregister-Event -SubscriptionId $outSub.Id -ErrorAction SilentlyContinue }
-        if ($errSub) { Unregister-Event -SubscriptionId $errSub.Id -ErrorAction SilentlyContinue }
-        if ($proc -and -not $proc.HasExited) {
-            try { $proc.Kill() } catch {}
-        }
-        if ($proc) { try { $proc.Dispose() } catch {} }
-        Clear-ScanProgress
-    }
-
-    return [pscustomobject]@{
-        Output = @($output.ToArray())
-        Code = $code
-    }
-}
 
 function Invoke-ApplyFileChanges {
-    param([object]$Pair, [object[]]$FileChanges, [string]$Policy)
-    $dstRoot = Resolve-DestinationPath $Pair.Dest
-    $results = New-Object System.Collections.Generic.List[object]
-    $roboThreads = [int]$script:Config.RobocopyThreads
-    $roboRetries = [int]$script:Config.RobocopyRetries
-    $roboWait = [int]$script:Config.RobocopyWaitSeconds
-
-    Write-Host ("  Applying changes for [{0}] ..." -f $Pair.Name) -ForegroundColor Cyan
-
-    # MKDIR — create directories and robocopy /E on the subdirectory only
-    foreach ($ch in @($FileChanges | Where-Object { $_.Action -eq "MKDIR" })) {
-        $srcDir = Join-PathSafe $Pair.Source $ch.RelPath
-        $dstDir = Join-PathSafe $dstRoot $ch.RelPath
-        try {
-            if (!(Test-Path -LiteralPath $dstDir -PathType Container)) {
-                New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
-            }
-            $roboArgStr = ConvertTo-ProcessArgumentString @($srcDir, $dstDir, "/E", "/COPY:DAT", "/DCOPY:DA", "/XJ", "/NP",
-                ("/MT:{0}" -f $roboThreads), ("/R:{0}" -f $roboRetries), ("/W:{0}" -f $roboWait))
-            $roboPsi = New-Object System.Diagnostics.ProcessStartInfo
-            $roboPsi.FileName = "robocopy.exe"
-            $roboPsi.Arguments = $roboArgStr
-            $roboPsi.UseShellExecute = $false
-            $roboPsi.CreateNoWindow = $true
-            $roboProc = New-Object System.Diagnostics.Process
-            $roboProc.StartInfo = $roboPsi
-            $roboProc.Start() | Out-Null
-            $roboProc.WaitForExit()
-            $roboExit = $roboProc.ExitCode
-            $roboProc.Dispose()
-            if ($roboExit -ge 8) {
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "MKDIR"; Path = $ch.RelPath; Status = "FAILED"; Message = "Robocopy exit $roboExit" })
-            } else {
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "MKDIR"; Path = $ch.RelPath; Status = "OK"; Message = "Copied subtree" })
-            }
-        } catch {
-            $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "MKDIR"; Path = $ch.RelPath; Status = "FAILED"; Message = (Format-ErrorSummary $_.Exception.Message) })
-        }
+    param([object]$Pair, [object[]]$FileChanges, [ValidateSet('STRICT','UPDATE_KEEP_EXTRAS','MISSING_ONLY')][string]$Policy)
+    $results=[Collections.Generic.List[object]]::new()
+    $files=[Collections.Generic.List[object]]::new()
+    # Apply only previewed paths; creating a directory never copies an unpreviewed subtree.
+    $ordered=@($FileChanges | Where-Object Action -eq 'MKDIR' | Sort-Object { Get-QueuePathDepth $_.RelPath }) +
+        @($FileChanges | Where-Object Action -eq 'COPY') +
+        @($FileChanges | Where-Object Action -eq 'DELETE' | Sort-Object { Get-QueuePathDepth $_.RelPath } -Descending)
+    foreach ($change in $ordered) {
+        if ($change.Action -eq 'DELETE' -and $Policy -ne 'STRICT') { continue }
+        $entry=[pscustomobject]@{PairName=$Pair.Name;RelPath=$change.RelPath;Action=$(if($change.Action -eq 'DELETE'){'Delete'}else{'Upsert'});IsDirectory=($change.Type -eq 'DIR');Size=$null;Source='';Dest=''}
+        if ($change.Action -eq 'COPY') { $files.Add($entry); continue }
+        $result=Apply-OneEntry $entry -PairOverride $Pair -MissingOnly:($Policy -eq 'MISSING_ONLY') -MirrorDelete
+        $results.Add($result)
     }
-
-    # COPY — individual files
-    foreach ($ch in @($FileChanges | Where-Object { $_.Action -eq "COPY" })) {
-        $srcPath = Join-PathSafe $Pair.Source $ch.RelPath
-        $dstPath = Join-PathSafe $dstRoot $ch.RelPath
-        try {
-            if (!(Test-Path -LiteralPath $srcPath)) {
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "COPY"; Path = $ch.RelPath; Status = "SKIPPED"; Message = "Source missing" }); continue
-            }
-            if (Test-FileNeedsCopy -Source $srcPath -Dest $dstPath) {
-                Copy-FileSafe -Source $srcPath -Dest $dstPath
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "COPY"; Path = $ch.RelPath; Status = "OK"; Message = "" })
-            } else {
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "COPY"; Path = $ch.RelPath; Status = "SKIPPED"; Message = "Already current" })
-            }
-        } catch {
-            $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "COPY"; Path = $ch.RelPath; Status = "FAILED"; Message = (Format-ErrorSummary $_.Exception.Message) })
-        }
+    if ($files.Count -gt 0) {
+        $online=@{}; $online[$Pair.Name]=Test-DestRootAvailable $Pair.Dest
+        $records=@(Invoke-ParallelFileTransfers @($files.ToArray()) $online $null @{} -PairOverride $Pair -MissingOnly:($Policy -eq 'MISSING_ONLY'))
+        foreach ($record in $records) { $results.Add($record.Result) }
     }
-
-    # DELETE — extra files and dirs
-    foreach ($ch in @($FileChanges | Where-Object { $_.Action -eq "DELETE" })) {
-        $dstPath = Join-PathSafe $dstRoot $ch.RelPath
-        try {
-            if (Test-Path -LiteralPath $dstPath) {
-                if ($ch.Type -eq "DIR") { Remove-Item -LiteralPath $dstPath -Recurse -Force -ErrorAction Stop }
-                else { Remove-Item -LiteralPath $dstPath -Force -ErrorAction Stop }
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "DELETE"; Path = $ch.RelPath; Status = "OK"; Message = "" })
-            } else {
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "DELETE"; Path = $ch.RelPath; Status = "SKIPPED"; Message = "Destination missing" })
-            }
-        } catch {
-            $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "DELETE"; Path = $ch.RelPath; Status = "FAILED"; Message = (Format-ErrorSummary $_.Exception.Message) })
-        }
-    }
-
     return @($results.ToArray())
 }
 
-function Get-TempCleanupMinAgeMinutes {
-    try {
-        if ($null -ne $script:Config -and $null -ne $script:Config.PSObject.Properties["TempCleanupMinAgeMinutes"]) {
-            $minutes = [int]$script:Config.TempCleanupMinAgeMinutes
-            if ($minutes -ge 0) { return $minutes }
-        }
-    } catch {}
-    return 10
-}
 
-function Test-InternalTempCleanupFileName {
-    param([string]$Name)
-    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
-    return ($Name -match '^\..+\.mbtmp-[0-9a-fA-F]{32}$')
-}
+
+
 
 function Test-PathInsideRoot {
     param([string]$Root, [string]$Path)
@@ -2226,50 +3782,31 @@ function Test-PathInsideRoot {
     }
 }
 
-function Test-TempCleanupFileEligible {
-    param(
-        [string]$FullPath,
-        [string]$DestRoot,
-        [datetime]$NowUtc = (Get-Date).ToUniversalTime()
-    )
-    if (-not (Test-PathInsideRoot -Root $DestRoot -Path $FullPath)) { return $false }
-    if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) { return $false }
-    $leaf = Split-Path -Path $FullPath -Leaf
-    if (-not (Test-InternalTempCleanupFileName $leaf)) { return $false }
-    try {
-        $item = Get-Item -LiteralPath $FullPath -Force -ErrorAction Stop
-        $age = $NowUtc - $item.LastWriteTimeUtc
-        return ($age.TotalMinutes -ge (Get-TempCleanupMinAgeMinutes))
-    } catch {
-        return $false
-    }
-}
 
-function Invoke-TempCleanupChanges {
-    param([object]$Pair, [object[]]$FileChanges)
-    $dstRoot = Resolve-DestinationPath $Pair.Dest
-    $results = New-Object System.Collections.Generic.List[object]
-    foreach ($ch in @($FileChanges | Where-Object { $_.Action -eq "CLEANUP" })) {
-        $dstPath = Join-PathSafe $dstRoot $ch.RelPath
-        try {
-            if (-not (Test-Path -LiteralPath $dstPath -PathType Leaf)) {
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "CLEANUP"; Path = $ch.RelPath; Status = "SKIPPED"; Message = "Destination missing" }) | Out-Null
-                continue
-            }
-            if (-not (Test-TempCleanupFileEligible -FullPath $dstPath -DestRoot $dstRoot)) {
-                $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "CLEANUP"; Path = $ch.RelPath; Status = "SKIPPED"; Message = "Not old temp file" }) | Out-Null
-                continue
-            }
-            Remove-Item -LiteralPath $dstPath -Force -ErrorAction Stop
-            $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "CLEANUP"; Path = $ch.RelPath; Status = "OK"; Message = "Removed old temp file" }) | Out-Null
-        } catch {
-            $results.Add([pscustomobject]@{ Pair = $Pair.Name; Action = "CLEANUP"; Path = $ch.RelPath; Status = "FAILED"; Message = (Format-ErrorSummary $_.Exception.Message) }) | Out-Null
+
+
+
+function Invoke-FullMirrorApplyResults {
+    param([object[]]$Pairs, [object[]]$PreviewResults, [ValidateSet('STRICT','UPDATE_KEEP_EXTRAS','MISSING_ONLY')][string]$Policy)
+    $results=[Collections.Generic.List[object]]::new()
+    foreach ($preview in $PreviewResults) {
+        if ($preview.Status -in @('ERROR','MISSING')) {
+            $results.Add([pscustomobject]@{Pair=$preview.Name;Action='SCAN';Path='';Status='FAILED';Message=$preview.Message})
+            continue
         }
+        if ($preview.Status -ne 'CHANGED') { continue }
+        $pair=@($Pairs | Where-Object Name -eq $preview.Name) | Select-Object -First 1
+        if ($null -eq $pair) { throw 'Preview pair no longer exists' }
+        foreach ($result in @(Invoke-ApplyFileChanges $pair @($preview.FileChanges) $Policy)) { $results.Add($result) }
     }
-    return @($results.ToArray())
+    if ($results.Count -eq 0) { Write-Color 'All pairs already match. Nothing to apply.' 'Green'; Wait-Back }
+    else { Show-ApplyResults @($results.ToArray()) 'Full Mirror Apply Results' }
+    Write-Log 'QUEUE' 'Pending queue preserved after Full Mirror; Apply Pending acknowledges matching entry IDs'
 }
 
 function Invoke-FullMirror {
+    if (-not (Enter-ApplyLock -Operation "Full Mirror")) { return }
+    try {
     $pairs = @(Get-Pairs)
     Show-Header "Full Mirror" "Dedicated full scan"
     if ($pairs.Count -eq 0) {
@@ -2308,21 +3845,30 @@ function Invoke-FullMirror {
     if ($null -eq $sub) { return }
     if ($sub -eq "2") {
         Show-Header "Full Mirror Apply" (Get-PolicyLabel $policy)
-        $results = Invoke-RobocopyForPairs -Pairs $pairs -Preview:$false -Policy $policy
-        Show-RobocopyResults -Results $results -Title "Full Mirror Results" -Pause:$true
-        Request-ClearPendingQueue
+        $previewResults = Invoke-FullMirrorScan -Pairs $pairs -Preview:$true -Policy $policy
+        $allMatched = ($previewResults | Where-Object { $_.Status -ne "MATCHED" }).Count -eq 0
+        if ($allMatched) {
+            Show-RobocopyResults -Results $previewResults -Title "Full Mirror Results" -Pause:$false
+            Write-Host ""
+            Write-Color "No changes are needed for the selected mirror mode." "Green"
+            Wait-Back
+
+            return
+        }
+        Invoke-FullMirrorApplyResults -Pairs $pairs -PreviewResults $previewResults -Policy $policy
         return
     }
 
     # Show preview
     Show-Header "Full Mirror Preview" (Get-PolicyLabel $policy)
-    $previewResults = Invoke-RobocopyForPairs -Pairs $pairs -Preview:$true -Policy $policy
+    $previewResults = Invoke-FullMirrorScan -Pairs $pairs -Preview:$true -Policy $policy
 
     $allMatched = ($previewResults | Where-Object { $_.Status -ne "MATCHED" }).Count -eq 0
     if ($allMatched) {
         Show-RobocopyResults -Results $previewResults -Title "Full Mirror Preview" -Pause:$false
         Write-Host ""
         Write-Color "No changes are needed for the selected mirror mode." "Green"
+
         Wait-Back
         return
     }
@@ -2332,40 +3878,11 @@ function Invoke-FullMirror {
     $ok = Read-EnterOrEsc "Apply these changes now?"
     if (-not $ok) { return }
     Show-Header "Full Mirror Apply" (Get-PolicyLabel $policy)
-    $changedResults = @($previewResults | Where-Object { $_.Status -eq "CHANGED" })
-    if ($changedResults.Count -eq 0) {
-        Write-Color "All pairs already match. Nothing to apply." "Green"
-        Wait-Back
-        return
+    Invoke-FullMirrorApplyResults -Pairs $pairs -PreviewResults $previewResults -Policy $policy
+    } finally {
+        $script:PendingSessionSnapshot = $null
+        Exit-ApplyLock
     }
-    $allApplyResults = New-Object System.Collections.Generic.List[object]
-    foreach ($pr in $changedResults) {
-        $pair = @($pairs | Where-Object { $_.Name -eq $pr.Name }) | Select-Object -First 1
-        if ($null -eq $pair) { continue }
-        if ($pr.FileChanges -and $pr.FileChanges.Count -gt 0) {
-            $normalChanges = @($pr.FileChanges | Where-Object { $_.Action -ne "CLEANUP" })
-            $cleanupChanges = @($pr.FileChanges | Where-Object { $_.Action -eq "CLEANUP" })
-            $hadApplicableChange = $false
-            if ($normalChanges.Count -gt 0) {
-                $pairResults = Invoke-ApplyFileChanges -Pair $pair -FileChanges $normalChanges -Policy $policy
-                foreach ($r in $pairResults) { $allApplyResults.Add($r) | Out-Null }
-                $hadApplicableChange = $true
-            }
-            if ($cleanupChanges.Count -gt 0) {
-                $cleanupResults = Invoke-TempCleanupChanges -Pair $pair -FileChanges $cleanupChanges
-                foreach ($r in $cleanupResults) { $allApplyResults.Add($r) | Out-Null }
-                $hadApplicableChange = $true
-            }
-            if (-not $hadApplicableChange) {
-                $allApplyResults.Add([pscustomobject]@{ Pair = $pr.Name; Action = "SKIP"; Status = "OK"; Path = ""; Message = "No changes found" }) | Out-Null
-            }
-        } else {
-            $allApplyResults.Add([pscustomobject]@{ Pair = $pr.Name; Action = "SKIP"; Status = "OK"; Path = ""; Message = "No changes found" }) | Out-Null
-        }
-    }
-    $finalResults = @($allApplyResults.ToArray())
-    Show-ApplyResults -Results $finalResults -Title "Full Mirror Apply Results"
-    Request-ClearPendingQueue
 }
 
 function Get-PolicyLabel {
@@ -2382,307 +3899,68 @@ function Get-PolicyShort {
     return "MISS"
 }
 
-function Invoke-RobocopyForPairs {
-    param(
-        [object[]]$Pairs,
-        [bool]$Preview,
-        [ValidateSet("STRICT","UPDATE_KEEP_EXTRAS","MISSING_ONLY")]
-        [string]$Policy
-    )
-    $results = New-Object System.Collections.Generic.List[object]
-    $maxConcurrent = if ($null -ne $script:Config.RobocopyParallelBatches) { [int]$script:Config.RobocopyParallelBatches } else { 3 }
-    if ($maxConcurrent -lt 1) { $maxConcurrent = 1 }
 
-    # Pre-check all pairs, collect only valid ones
-    $validPairs = New-Object System.Collections.Generic.List[object]
-    foreach ($pair in $Pairs) {
-        if (!(Test-Path -LiteralPath $pair.Source -PathType Container)) {
-            $results.Add([pscustomobject]@{ Name=$pair.Name; Mode=$(if($Preview){"PREVIEW"}else{"APPLY"}); Policy=(Get-PolicyShort $Policy); Status="MISSING"; Code=16; Time=0; FilesTotal=0; NewFiles=0; UpdatedFiles=0; FilesSkipped=0; ExtraItems=0; FilesFailed=0; Message="Source missing" }) | Out-Null
-            continue
-        }
-        if (!(Test-DestRootAvailable $pair.Dest)) {
-            $results.Add([pscustomobject]@{ Name=$pair.Name; Mode=$(if($Preview){"PREVIEW"}else{"APPLY"}); Policy=(Get-PolicyShort $Policy); Status="ERROR"; Code=16; Time=0; FilesTotal=0; NewFiles=0; UpdatedFiles=0; FilesSkipped=0; ExtraItems=0; FilesFailed=0; Message="Destination root unavailable" }) | Out-Null
-            continue
-        }
-        $validPairs.Add($pair) | Out-Null
+
+
+
+
+
+
+
+function New-FullMirrorErrorResult {
+    param([object]$Pair, [bool]$Preview, [string]$Policy, [string]$Status, [string]$Message)
+    return [pscustomobject]@{
+        Name=$Pair.Name; Mode=$(if($Preview){"PREVIEW"}else{"APPLY"}); Policy=(Get-PolicyShort $Policy); Status=$Status; Code=16; Time=0
+        FilesTotal=0; NewFiles=0; NewDirs=0; UpdatedFiles=0; FilesSkipped=0; ExtraItems=0; FilesFailed=0; Message=$Message; Changes=@(); FileChanges=@()
     }
+}
 
-    if ($validPairs.Count -eq 0) { return @($results.ToArray()) }
-
-    $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mb_robocopy_" + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+function Invoke-FullMirrorScan {
+    param([object[]]$Pairs, [bool]$Preview, [ValidateSet('STRICT','UPDATE_KEEP_EXTRAS','MISSING_ONLY')][string]$Policy)
+    $limit=[math]::Max(1,[math]::Min(32,[int]$script:Config.RobocopyParallelBatches))
+    $pool=[runspacefactory]::CreateRunspacePool(1,$limit)
+    $jobs=[Collections.Generic.List[object]]::new()
+    $results=[Collections.Generic.List[object]]::new()
+    $worker={
+        param($ScriptPath,$ConfigJson,$Pair,$Policy)
+        . $ScriptPath
+        $ErrorActionPreference='Stop'
+        $script:Config=$ConfigJson | ConvertFrom-Json
+        $scan=Get-InternalMirrorScan $Pair $Policy
+        return $scan
+    }
     try {
-        $procForPairIndex = @{}
-        $totalPairs = $validPairs.Count
-        $nextPairIndex = 0
-        $displayedCount = 0
-        $procs = New-Object System.Collections.Generic.List[object]
-
-        Write-Color "  Processing $totalPairs pairs ($maxConcurrent concurrent)" "DarkGray"
-        $topLine = [Console]::CursorTop
-
-        $startProcess = {
-            param($Pair, $PairIndex, $LineIdx)
-            $outFile = Join-Path $tempDir ([guid]::NewGuid().ToString('N') + ".txt")
-            $args = Build-RobocopyArgs -Pair $Pair -Preview:$Preview -Policy $Policy
-            $argStr = ConvertTo-ProcessArgumentString $args
-            $startTime = Get-Date
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = "robocopy.exe"
-            $psi.Arguments = $argStr
-            $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
-            $psi.RedirectStandardOutput = $true
-            $psi.StandardOutputEncoding = [System.Text.Encoding]::GetEncoding(437)
-            $proc = New-Object System.Diagnostics.Process
-            $proc.StartInfo = $psi
-            $proc.Start() | Out-Null
-            $obj = [PSCustomObject]@{
-                Process = $proc
-                Pair = $Pair
-                OutFile = $outFile
-                StartTime = $startTime
-                LineIdx = $LineIdx
-                PairIndex = $PairIndex
-                Done = $false
-                RealElapsed = $null
+        $pool.Open(); $next=0
+        while ($next -lt $Pairs.Count -or $jobs.Count -gt 0) {
+            while ($next -lt $Pairs.Count -and $jobs.Count -lt $limit) {
+                $pair=$Pairs[$next]; $next++
+                $ps=[powershell]::Create(); $ps.RunspacePool=$pool
+                [void]$ps.AddScript($worker.ToString()).AddArgument($script:ScriptPath).AddArgument(($script:Config | ConvertTo-Json -Depth 50)).AddArgument($pair).AddArgument($Policy)
+                try { $jobs.Add([pscustomobject]@{Shell=$ps;Handle=$ps.BeginInvoke();Pair=$pair;Timer=[Diagnostics.Stopwatch]::StartNew()}) }
+                catch { $ps.Dispose(); throw }
             }
-            [Console]::SetCursorPosition(0, $topLine + $LineIdx)
-            $dn = $Pair.Name
-            if ($dn.Length -gt 28) { $dn = $dn.Substring(0, 25) + "..." }
-            Write-Host ("  {0,-30} | Scanning..." -f $dn) -ForegroundColor DarkGray
-            return $obj
-        }
-
-        # Fill initial slots
-        while ($nextPairIndex -lt $totalPairs -and $procs.Count -lt $maxConcurrent) {
-            $obj = & $startProcess -Pair $validPairs[$nextPairIndex] -PairIndex $nextPairIndex -LineIdx $displayedCount
-            $procForPairIndex[$nextPairIndex] = $obj
-            $procs.Add($obj) | Out-Null
-            $displayedCount++
-            $nextPairIndex++
-        }
-
-        $frames = @('|', '/', '-', '\')
-        $fi = 0
-        [Console]::CursorVisible = $false
-
-        while ($procs.Count -gt 0) {
-            $fi = ($fi + 1) % $frames.Length
-
-            # Check completed (reverse iteration for safe removal)
-            for ($i = $procs.Count - 1; $i -ge 0; $i--) {
-                $p = $procs[$i]
-                $p.Process.Refresh()
-                if ($p.Process.HasExited) {
-                    $p.Done = $true
-                    $elapsed = (Get-Date) - $p.StartTime
-                    $p.RealElapsed = $elapsed
-                    $tempCode = $p.Process.ExitCode
-                    $outputText = $p.Process.StandardOutput.ReadToEnd()
-                    [System.IO.File]::WriteAllText($p.OutFile, $outputText, [System.Text.Encoding]::Unicode)
-                    $tempOutput = @($outputText -split '\r?\n')
-                    $tempChangeSummary = Get-RobocopyChangeSummary -Output $tempOutput
-                    $tempSummary = Get-RobocopySummary -Output $tempOutput
-                    $tempIgnoreExtra = ($Policy -eq "UPDATE_KEEP_EXTRAS" -or $Policy -eq "MISSING_ONLY")
-                    if ($tempIgnoreExtra) { $tempChangeSummary.ExtraFiles = 0; $tempChangeSummary.ExtraDirs = 0 }
-                    $tempHasChanges = ($tempChangeSummary.NewFiles -gt 0 -or $tempChangeSummary.NewDirs -gt 0 -or $tempChangeSummary.UpdatedFiles -gt 0 -or $tempChangeSummary.ExtraFiles -gt 0 -or $tempChangeSummary.ExtraDirs -gt 0)
-                    # Detect gaps: empty dirs and Arabic paths not resolvable from change lines
-                    $summaryNewDirs = [math]::Max(0, $tempSummary.DirsCopied - $tempSummary.DirsSkipped)
-                    $summaryNewFiles = [math]::Max(0, $tempSummary.FilesCopied - $tempSummary.FilesSkipped)
-                    $hasMissingNewDirs = ($summaryNewDirs -gt $tempChangeSummary.NewDirs)
-                    $hasMissingNewFiles = ($summaryNewFiles -gt $tempChangeSummary.NewFiles)
-                    if ($summaryNewDirs -gt $tempChangeSummary.NewDirs) { $tempChangeSummary.NewDirs = $summaryNewDirs }
-                    if ($summaryNewFiles -gt $tempChangeSummary.NewFiles) { $tempChangeSummary.NewFiles = $summaryNewFiles }
-                    if (-not $tempIgnoreExtra) {
-                        if ($tempSummary.DirsExtras -gt $tempChangeSummary.ExtraDirs) { $tempChangeSummary.ExtraDirs = $tempSummary.DirsExtras }
-                        if ($tempSummary.FilesExtras -gt $tempChangeSummary.ExtraFiles) { $tempChangeSummary.ExtraFiles = $tempSummary.FilesExtras }
-                    }
-                    $tempHasChanges = ($tempChangeSummary.NewFiles -gt 0 -or $tempChangeSummary.NewDirs -gt 0 -or $tempChangeSummary.UpdatedFiles -gt 0 -or $tempChangeSummary.ExtraFiles -gt 0 -or $tempChangeSummary.ExtraDirs -gt 0)
-                    if ($tempCode -ge 16) { $tempStatus = "ERROR" }
-                    elseif ($tempHasChanges) { $tempStatus = "CHANGED" }
-                    else { $tempStatus = "MATCHED" }
-                    $tempColor = switch ($tempStatus) { "MATCHED" { "Green" } "CHANGED" { "Yellow" } default { "Red" } }
-                    $tempMsg = (@($tempOutput | Select-Object -Last 2) -join " ")
-                    if ($tempMsg.Length -gt 120) { $tempMsg = $tempMsg.Substring(0, 120) }
-                    $tempChangeLines = @($tempOutput | Where-Object { Test-RobocopyChangeLine $_ })
-                    if ($tempIgnoreExtra) {
-                        $tempChangeLines = @($tempChangeLines | Where-Object { -not ([string]$_ -match '^\s*\*EXTRA') })
-                    }
-                    $p | Add-Member -NotePropertyName ParsedStatus -NotePropertyValue $tempStatus -Force
-                    $p | Add-Member -NotePropertyName ParsedCode -NotePropertyValue $tempCode -Force
-                    $p | Add-Member -NotePropertyName ParsedSummary -NotePropertyValue $tempSummary -Force
-                    $p | Add-Member -NotePropertyName ParsedChangeSummary -NotePropertyValue $tempChangeSummary -Force
-                    $p | Add-Member -NotePropertyName ParsedOutput -NotePropertyValue $tempOutput -Force
-                    $p | Add-Member -NotePropertyName ParsedMessage -NotePropertyValue $tempMsg -Force
-                    $p | Add-Member -NotePropertyName ParsedChanges -NotePropertyValue @($tempChangeLines | ForEach-Object { Get-RobocopyChangeText $_ }) -Force
-                    $srcRoot = $p.Pair.Source
-                    $dstRoot = Resolve-DestinationPath $p.Pair.Dest
-                    $tempFileChanges = @($tempChangeLines | ForEach-Object { Convert-RobocopyLineToChange -Line $_ -SourceRoot $srcRoot -DestRoot $dstRoot } | Where-Object { $null -ne $_ })
-                    # Resolve garbled paths and detect missing items (empty dirs, Arabic names)
-                    $hasBadPaths = $false
-                    foreach ($__fc in $tempFileChanges) { if ($__fc.RelPath -match '\?') { $hasBadPaths = $true; break } }
-                    if ($hasBadPaths -or $hasMissingNewDirs -or $hasMissingNewFiles) {
-                        $__resolved = New-Object System.Collections.Generic.List[object]
-                        $__oem = [System.Text.Encoding]::GetEncoding(437)
-                        # Resolve garbled paths by scanning parent dirs
-                        foreach ($__fc in $tempFileChanges) {
-                            if ($__fc.RelPath -match '\?') {
-                                $__parts = $__fc.RelPath -split '\\'
-                                $__garbledName = $__parts[-1]
-                                $__parentRel = if ($__parts.Length -gt 1) { ($__parts[0..($__parts.Length-2)] -join '\') } else { "" }
-                                $__searchRoot = if ($__fc.ChangeAction -eq "DELETE") { $dstRoot } else { $srcRoot }
-                                $__parentFull = if ($__parentRel) { Join-PathSafe $__searchRoot $__parentRel } else { $__searchRoot }
-                                $__actualName = $null
-                                if (Test-Path -LiteralPath $__parentFull -PathType Container) {
-                                    $__items = @(Get-ChildItem -LiteralPath $__parentFull -Force -ErrorAction SilentlyContinue)
-                                    foreach ($__item in $__items) {
-                                        $__oemName = $__oem.GetString($__oem.GetBytes($__item.Name))
-                                        if ($__oemName -eq $__garbledName) { $__actualName = $__item.Name; break }
-                                    }
-                                }
-                                if ($__actualName) {
-                                    $__actualRel = if ($__parentRel) { "$__parentRel\$__actualName" } else { $__actualName }
-                                    $__resolved.Add([PSCustomObject]@{ Action = $__fc.Action; Type = $__fc.Type; RelPath = $__actualRel; ChangeAction = $__fc.ChangeAction })
-                                } else { $__resolved.Add($__fc) }
-                            } else { $__resolved.Add($__fc) }
-                        }
-                        # Add missing empty directories
-                        if ($hasMissingNewDirs) {
-                            $__emptyDirs = @(Get-ChildItem -LiteralPath $srcRoot -Directory -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { (Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0 })
-                            foreach ($__dir in $__emptyDirs) {
-                                $__relPath = Get-RelativePath $srcRoot $__dir.FullName
-                                $__destCheck = Join-PathSafe $dstRoot $__relPath
-                                if (-not (Test-Path -LiteralPath $__destCheck -PathType Container)) {
-                                    $__dup = $false
-                                    foreach ($__ex in $__resolved) { if ($__ex.RelPath -eq $__relPath -and $__ex.Type -eq "DIR") { $__dup = $true; break } }
-                                    if (-not $__dup) { $__resolved.Add([PSCustomObject]@{ Action = "MKDIR"; Type = "DIR"; RelPath = $__relPath; ChangeAction = "NEW" }) }
-                                }
-                            }
-                        }
-                        $tempFileChanges = @($__resolved.ToArray())
-                    }
-                    $p | Add-Member -NotePropertyName ParsedFileChanges -NotePropertyValue $tempFileChanges -Force
-                    $dn = $p.Pair.Name
-                    if ($dn.Length -gt 28) { $dn = $dn.Substring(0, 25) + "..." }
-                    $elapsedStr = [math]::Round($elapsed.TotalSeconds, 1).ToString() + "s"
-                    [Console]::SetCursorPosition(0, $topLine + $p.LineIdx)
-                    Write-Host -NoNewline (" " * 80)
-                    [Console]::SetCursorPosition(0, $topLine + $p.LineIdx)
-                    Write-Host ("  {0,-30} ✓ {1} ({2})     " -f $dn, $tempStatus, $elapsedStr) -ForegroundColor $tempColor
-
-                    # Remove from active list
-                    $procs.RemoveAt($i)
-
-                    # Start next pair if any remain
-                    if ($nextPairIndex -lt $totalPairs) {
-                        $obj = & $startProcess -Pair $validPairs[$nextPairIndex] -PairIndex $nextPairIndex -LineIdx $displayedCount
-                        $procForPairIndex[$nextPairIndex] = $obj
-                        $procs.Add($obj) | Out-Null
-                        $displayedCount++
-                        $nextPairIndex++
-                    }
-                }
+            foreach ($job in @($jobs.ToArray())) {
+                if (-not $job.Handle.IsCompleted) { continue }
+                try {
+                    $output=@($job.Shell.EndInvoke($job.Handle))
+                    if ($job.Shell.HadErrors -or $output.Count -ne 1) { throw ($job.Shell.Streams.Error | Out-String) }
+                    $scan=$output[0]; $c=$scan.ChangeSummary
+                    $results.Add([pscustomobject]@{Name=$job.Pair.Name;Mode='PREVIEW';Policy=(Get-PolicyShort $Policy);Status=$(if($scan.HasChanges){'CHANGED'}else{'MATCHED'});Code=0;Time=[math]::Round($job.Timer.Elapsed.TotalSeconds,1);NewFiles=$c.NewFiles;NewDirs=$c.NewDirs;UpdatedFiles=$c.UpdatedFiles;FilesSkipped=0;ExtraItems=($c.ExtraFiles+$c.ExtraDirs);FilesTotal=@($scan.FileChanges).Count;FilesFailed=0;Message='';Changes=$scan.Changes;FileChanges=$scan.FileChanges})
+                } catch { $results.Add((New-FullMirrorErrorResult $job.Pair $true $Policy 'ERROR' $_.Exception.Message)) }
+                finally { $job.Shell.Dispose(); [void]$jobs.Remove($job) }
             }
-
-            # Update spinners for remaining running processes
-            for ($i = 0; $i -lt $procs.Count; $i++) {
-                $p = $procs[$i]
-                $p.Process.Refresh()
-                if (-not $p.Process.HasExited -and -not $p.Done) {
-                    [Console]::SetCursorPosition(0, $topLine + $p.LineIdx)
-                    $dn = $p.Pair.Name
-                    if ($dn.Length -gt 28) { $dn = $dn.Substring(0, 25) + "..." }
-                    $elapsed = (Get-Date) - $p.StartTime
-                    $elapsedStr = [math]::Round($elapsed.TotalSeconds, 1).ToString() + "s"
-                    $frame = $frames[($fi + $i) % $frames.Length]
-                    Write-Host ("  {0,-30} {1} Scanning ({2})" -f $dn, $frame, $elapsedStr) -ForegroundColor DarkGray
-                }
-            }
-
-            Start-Sleep -Milliseconds 200
+            if ($jobs.Count -gt 0) { Start-Sleep -Milliseconds 50 }
         }
-
-        [Console]::CursorVisible = $true
-
-        # Parse results in original pair order
-        for ($i = 0; $i -lt $totalPairs; $i++) {
-            $p = $procForPairIndex[$i]
-            $p.Process.WaitForExit()
-            $elapsed = if ($null -ne $p.RealElapsed) { $p.RealElapsed } else { (Get-Date) - $p.StartTime }
-            $pair = $p.Pair
-            if ($null -ne $p.ParsedStatus) {
-                $code = $p.ParsedCode
-                $status = $p.ParsedStatus
-                $summary = $p.ParsedSummary
-                $changeSummary = $p.ParsedChangeSummary
-                $msg = $p.ParsedMessage
-                $changes = $p.ParsedChanges
-                $fileChanges = $p.ParsedFileChanges
-            } else {
-                $code = $p.Process.ExitCode
-                $output = @(Get-Content -LiteralPath $p.OutFile -Encoding Unicode -ErrorAction SilentlyContinue)
-                $summary = Get-RobocopySummary -Output $output
-                $changeSummary = Get-RobocopyChangeSummary -Output $output
-                $ignoreExtra = ($Policy -eq "UPDATE_KEEP_EXTRAS" -or $Policy -eq "MISSING_ONLY")
-                if ($ignoreExtra) {
-                    $summary.FilesExtras = 0; $summary.DirsExtras = 0
-                    $changeSummary.ExtraFiles = 0; $changeSummary.ExtraDirs = 0
-                }
-                $status = Decode-RobocopyExit $code
-                $hasRealChanges = ($changeSummary.NewFiles -gt 0 -or $changeSummary.NewDirs -gt 0 -or $changeSummary.UpdatedFiles -gt 0 -or $changeSummary.ExtraFiles -gt 0 -or $changeSummary.ExtraDirs -gt 0)
-                $summaryNewDirs = [math]::Max(0, $summary.DirsCopied - $summary.DirsSkipped)
-                $summaryNewFiles = [math]::Max(0, $summary.FilesCopied - $summary.FilesSkipped)
-                if ($summaryNewDirs -gt $changeSummary.NewDirs) { $changeSummary.NewDirs = $summaryNewDirs }
-                if ($summaryNewFiles -gt $changeSummary.NewFiles) { $changeSummary.NewFiles = $summaryNewFiles }
-                if (-not $ignoreExtra) {
-                    if ($summary.DirsExtras -gt $changeSummary.ExtraDirs) { $changeSummary.ExtraDirs = $summary.DirsExtras }
-                    if ($summary.FilesExtras -gt $changeSummary.ExtraFiles) { $changeSummary.ExtraFiles = $summary.FilesExtras }
-                }
-                $hasRealChanges = ($changeSummary.NewFiles -gt 0 -or $changeSummary.NewDirs -gt 0 -or $changeSummary.UpdatedFiles -gt 0 -or $changeSummary.ExtraFiles -gt 0 -or $changeSummary.ExtraDirs -gt 0)
-                if ($hasRealChanges) { $status = "CHANGED" }
-                elseif ($status -eq "CHANGED") { $status = "MATCHED" }
-                $msg = (@($output | Select-Object -Last 2 | ForEach-Object { [string]$_ }) -join " ")
-                if ($msg.Length -gt 120) { $msg = $msg.Substring(0, 120) }
-                $changeLines = @($output | Where-Object { Test-RobocopyChangeLine $_ })
-                if ($ignoreExtra) {
-                    $changeLines = @($changeLines | Where-Object { -not ([string]$_ -match '^\s*\*EXTRA') })
-                }
-                $changes = @($changeLines | ForEach-Object { Get-RobocopyChangeText $_ })
-                $fcSrcRoot = $pair.Source
-                $fcDstRoot = Resolve-DestinationPath $pair.Dest
-                $fileChanges = @($changeLines | ForEach-Object { Convert-RobocopyLineToChange -Line $_ -SourceRoot $fcSrcRoot -DestRoot $fcDstRoot } | Where-Object { $null -ne $_ })
-            }
-            $results.Add([pscustomobject]@{
-                Name = $pair.Name
-                Mode = $(if ($Preview) { "PREVIEW" } else { "APPLY" })
-                Policy = Get-PolicyShort $Policy
-                Status = $status
-                Code = $code
-                Time = [math]::Round($elapsed.TotalSeconds, 1)
-                NewFiles = $changeSummary.NewFiles
-                NewDirs = $changeSummary.NewDirs
-                UpdatedFiles = $changeSummary.UpdatedFiles
-                FilesSkipped = $summary.FilesSkipped
-                ExtraItems = ($changeSummary.ExtraFiles + $changeSummary.ExtraDirs)
-                FilesTotal = ($changeSummary.NewFiles + $changeSummary.NewDirs + $changeSummary.UpdatedFiles + $changeSummary.ExtraFiles + $changeSummary.ExtraDirs)
-                FilesFailed = $summary.FilesFailed
-                Message = $msg
-                Changes = $changes
-                FileChanges = $fileChanges
-            }) | Out-Null
-        }
-        # Move cursor past all display lines
-        [Console]::SetCursorPosition(0, $topLine + $displayedCount + 1)
     } finally {
-        if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
+        foreach ($job in @($jobs.ToArray())) { try { $job.Shell.Stop() } finally { $job.Shell.Dispose() } }
+        $pool.Dispose()
     }
-    return @($results.ToArray())
+    return @($results.ToArray() | Sort-Object Name)
 }
 
 function Show-RobocopyResults {
     param([object[]]$Results, [string]$Title, [bool]$Pause = $true)
-    Show-Header $Title "Robocopy summary"
+    Show-Header $Title "Full Mirror comparison"
     $wPair = 18; $wPolicy = 7; $wStatus = 7; $wTotal = 6; $wNew = 5; $wUpdate = 6; $wSkip = 6; $wExtra = 6; $wFail = 5; $wTime = 6
     $line = "+" + ("-"*($wPair+2)) + "+" + ("-"*($wPolicy+2)) + "+" + ("-"*($wStatus+2)) + "+" + ("-"*($wTotal+2)) + "+" + ("-"*($wNew+2)) + "+" + ("-"*($wUpdate+2)) + "+" + ("-"*($wSkip+2)) + "+" + ("-"*($wExtra+2)) + "+" + ("-"*($wFail+2)) + "+" + ("-"*($wTime+2)) + "+"
     Write-Color $line "DarkGray"
@@ -2715,8 +3993,8 @@ function Show-RobocopyResults {
     }
     Write-Color $line "DarkGray"
     Write-Host ""
-    Write-Color "Total = New + Upd + Extra + Cleanup. New = missing files & folders. Upd = source updates. Extra = destination-only files/folders." "DarkGray"
-    Write-Color "Cleanup = old script temp files (.mbtmp-*) that are safe to remove." "DarkGray"
+    Write-Color "Total = New + Upd + Extra. New = missing files & folders. Upd = source updates. Extra = destination-only files/folders." "DarkGray"
+    Write-Color "Excluded files and internal staging paths are protected. Failed deletes require review." "DarkGray"
     Write-Color "STRICT deletes Extra. UPDATE keeps Extra. MISSING ignores Upd and Extra." "DarkGray"
     Write-Host ""
     $detailShown = $false
@@ -2782,7 +4060,7 @@ function Show-Status {
     Write-Color ("Queue file  : " + $script:QueuePath) "DarkGray"
     Write-Color ("Log file    : " + $script:LogPath) "DarkGray"
     Write-Host ""
-    $task = Get-ScheduledTask -TaskName ([string]$script:Config.TaskName) -ErrorAction SilentlyContinue
+    $task = Get-OwnedScheduledTask -TaskName ([string]$script:Config.TaskName)
     $watchers = @(Get-WatcherProcesses)
     Write-Color ("Pairs               : " + (Get-Pairs).Count) "Yellow"
     Write-Color ("Raw queue entries   : " + $entries.Count) "Yellow"
@@ -2792,7 +4070,7 @@ function Show-Status {
     Write-Host ""
     foreach ($pair in Get-Pairs) {
         $srcOk = Test-Path -LiteralPath $pair.Source -PathType Container
-        $dstOk = Test-DestRootAvailable $pair.Dest
+        $dstOk = Test-DestRootAvailableFast $pair.Dest
         $color = if ($srcOk -and $dstOk) { "Green" } else { "DarkYellow" }
         Write-Color ("[{0}] {1}" -f ($(if($srcOk -and $dstOk){"OK"}else{"WARN"}), $pair.Name)) $color
         Write-Color ("  Source: " + $pair.Source) "DarkGray"
@@ -2854,7 +4132,11 @@ function Add-Pair {
     Write-Host ""
     if (-not (Read-EnterOrEsc "Press Enter to save this pair, or Esc to cancel.")) { return }
     $pairs = @(Get-Pairs)
-    $pairs += [pscustomobject]@{ Name=$name; Source=$source; Dest=$dest }
+    $baseName=$name; $suffix=2
+    while (@($pairs | Where-Object { $_.Name -ieq $name }).Count -gt 0) { $name="$baseName ($suffix)"; $suffix++ }
+    $newPair=[pscustomobject]@{Name=$name;Source=$source;Dest=$dest}
+    Assert-PairLayout $newPair
+    $pairs += $newPair
     Set-Pairs $pairs
     Set-MapArray "PairExcludeDirs" $name @()
     Set-MapArray "PairExcludeFiles" $name @()
@@ -2886,11 +4168,9 @@ function Edit-Pair {
     $dest = Read-LineOrEsc ("Destination [{0}]: " -f $p.Dest)
     if ($null -eq $dest) { return }
     $oldName = [string]$p.Name
-    $changedPath = $false
     if (-not [string]::IsNullOrWhiteSpace($source)) { $p.Source = Normalize-PathText $source }
-    if (-not [string]::IsNullOrWhiteSpace($source)) { $changedPath = $true }
-    if (-not [string]::IsNullOrWhiteSpace($dest)) { $p.Dest = Normalize-PathText $dest; $changedPath = $true }
-    if ($changedPath) { $p.Name = Get-AutoPairName -Source $p.Source -Dest $p.Dest }
+    if (-not [string]::IsNullOrWhiteSpace($dest)) { $p.Dest = Normalize-PathText $dest }
+    # Pair names are stable identifiers for pending work and exclusion maps.
     if ($oldName -ne $p.Name) {
         Set-MapArray "PairExcludeDirs" $p.Name @(Get-MapArray "PairExcludeDirs" $oldName)
         Set-MapArray "PairExcludeFiles" $p.Name @(Get-MapArray "PairExcludeFiles" $oldName)
@@ -2932,7 +4212,7 @@ function Add-SmartExclusion {
     $leafName = Split-Path -Leaf $fullPath
     foreach ($p in Get-Pairs) {
         $src = Normalize-PathText $p.Source
-        if ($fullPath.Length -ge $src.Length -and $fullPath.Substring(0, $src.Length) -eq $src) {
+        if (Test-PathInsideRoot $src $fullPath) {
             $matchedPair = $p
             if ($fullPath.Length -gt $src.Length) { $relativePath = $fullPath.Substring($src.Length).TrimStart('\') }
             break
@@ -3100,10 +4380,11 @@ function SettingsMenu {
         Write-Color "[3] RobocopyThreads         = " "Yellow" -NoNewLine; Write-Color $script:Config.RobocopyThreads "Cyan" -NoNewLine; Write-Color "   # Parallel copy threads (/MT)" "DarkGray"
         Write-Color "[4] RobocopyRetries         = " "Yellow" -NoNewLine; Write-Color $script:Config.RobocopyRetries "Cyan" -NoNewLine; Write-Color "   # Retry count on failure (/R)" "DarkGray"
         Write-Color "[5] RobocopyWaitSeconds     = " "Yellow" -NoNewLine; Write-Color $script:Config.RobocopyWaitSeconds "Cyan" -NoNewLine; Write-Color "   # Wait between retries in seconds (/W)" "DarkGray"
-        Write-Color "[6] RobocopyParallelBatches   = " "Yellow" -NoNewLine; Write-Color $script:Config.RobocopyParallelBatches "Cyan" -NoNewLine; Write-Color "   # Concurrent pairs during Full Mirror" "DarkGray"
-        Write-Color "[7] DeleteDestOnSourceDelete= " "Yellow" -NoNewLine; Write-Color $script:Config.DeleteDestOnSourceDelete "Cyan" -NoNewLine; Write-Color "   # Delete dest file if source is deleted" "DarkGray"
-        Write-Color "[8] DataDir                 = " "Yellow" -NoNewLine; Write-Color $script:Config.DataDir "Cyan" -NoNewLine; Write-Color "   # Program data folder" "DarkGray"
-        Write-Color "[9] Manage Drive Maps" "Yellow"
+        Write-Color "[6] RobocopyParallelBatches = " "Yellow" -NoNewLine; Write-Color $script:Config.RobocopyParallelBatches "Cyan" -NoNewLine; Write-Color "   # Concurrent pairs during Full Mirror" "DarkGray"
+        Write-Color "[7] ParallelFileTransfers   = " "Yellow" -NoNewLine; Write-Color $script:Config.ParallelFileTransfers "Cyan" -NoNewLine; Write-Color "   # Concurrent files during Apply Pending (1-32)" "DarkGray"
+        Write-Color "[8] DeleteDestOnSourceDelete= " "Yellow" -NoNewLine; Write-Color $script:Config.DeleteDestOnSourceDelete "Cyan" -NoNewLine; Write-Color "   # Delete dest file if source is deleted" "DarkGray"
+        Write-Color "[9] DataDir                 = " "Yellow" -NoNewLine; Write-Color $script:Config.DataDir "Cyan" -NoNewLine; Write-Color "   # Program data folder" "DarkGray"
+        Write-Color "[D] Manage Drive Maps" "Yellow"
         Write-Color "[Esc] Back" "DarkGray"
         Write-Host ""
         $choice = Read-KeyChoice
@@ -3115,9 +4396,10 @@ function SettingsMenu {
             "4" { Set-IntSetting "RobocopyRetries" 0 }
             "5" { Set-IntSetting "RobocopyWaitSeconds" 0 }
             "6" { Set-IntSetting "RobocopyParallelBatches" 1 }
-            "7" { Toggle-BoolSetting "DeleteDestOnSourceDelete" }
-            "8" { Set-StringSetting "DataDir" }
-            "9" { Manage-DriveMapsMenu }
+            "7" { Set-RangedIntSetting "ParallelFileTransfers" 1 32 }
+            "8" { Toggle-BoolSetting "DeleteDestOnSourceDelete" }
+            "9" { Set-StringSetting "DataDir" }
+            { $_ -ieq "D" } { Manage-DriveMapsMenu }
         }
     }
 }
@@ -3149,7 +4431,7 @@ function Manage-DriveMapsMenu {
 }
 
 function Add-OrUpdateDriveMap {
-    Show-Header "Add Drive Map" "Example: Y: => \\server\share"
+    Show-Header "Add Drive Map" "Example: Z: => \\server\share"
     $drive = Read-LineOrEsc "Drive name: "
     if ($null -eq $drive -or [string]::IsNullOrWhiteSpace($drive)) { return }
     $target = Read-LineOrEsc "UNC target: "
@@ -3193,6 +4475,21 @@ function Set-IntSetting {
     }
 }
 
+function Set-RangedIntSetting {
+    param([string]$Name, [int]$Min, [int]$Max)
+    Show-Header "Set $Name" "Esc = cancel"
+    $value = Read-LineOrEsc "New value ($Min-$Max): "
+    if ($null -eq $value -or [string]::IsNullOrWhiteSpace($value)) { return }
+    $n = 0
+    if ([int]::TryParse($value, [ref]$n) -and $n -ge $Min -and $n -le $Max) {
+        $script:Config.PSObject.Properties[$Name].Value = $n
+        Save-Config
+    } else {
+        Write-Color ("Invalid number. Enter a value from {0} to {1}." -f $Min, $Max) "Red"
+        Wait-Back
+    }
+}
+
 function Set-StringSetting {
     param([string]$Name)
     Show-Header "Set $Name" "Esc = cancel"
@@ -3200,7 +4497,7 @@ function Set-StringSetting {
     if ($null -eq $value -or [string]::IsNullOrWhiteSpace($value)) { return }
     $script:Config.PSObject.Properties[$Name].Value = $value.Trim()
     Save-Config
-    Initialize-App
+    Initialize-App -ReadOnly:($Mode -in @("PreviewPending","Status"))
 }
 
 function Toggle-BoolSetting {
@@ -3221,18 +4518,20 @@ function Install-Required {
     New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
     $taskName = [string]$script:Config.TaskName
     try {
+        $existing=Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -ceq $taskName }
+        if ($null -ne $existing -and -not (Test-OwnedScheduledTask $existing)) { throw 'Task name belongs to another resource; choose a different TaskName' }
         Stop-KnownWatcherProcesses
         New-HiddenWatchLauncher
         Remove-KnownScheduledTasks -KeepTaskName $taskName
         $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$script:HiddenWatchLauncherPath`""
         $trigger = New-ScheduledTaskTrigger -AtLogOn
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit ([timespan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
         $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "MiraQueue Backup watcher" -Force -ErrorAction Stop | Out-Null
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "MiraQueue watcher" -Force -ErrorAction Stop | Out-Null
         Write-Color ("Scheduled task installed: " + $taskName) "Green"
         Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
         Start-Sleep -Milliseconds 600
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        $task = Get-OwnedScheduledTask -TaskName $taskName
         if ($null -ne $task) {
             Write-Color ("Scheduled task state: " + $task.State) "Green"
         }
@@ -3245,10 +4544,10 @@ function Install-Required {
 }
 
 function New-HiddenWatchLauncher {
-    $vbsPtr = $script:ScriptDirPointerFile
-    $vbs = @"
+    $pointer=$script:ScriptDirPointerFile.Replace('"','""')
+    $vbs=@"
 Set fso = CreateObject("Scripting.FileSystemObject")
-Set file = fso.OpenTextFile("$vbsPtr", 1)
+Set file = fso.OpenTextFile("$pointer", 1, False, -1)
 scriptDir = file.ReadLine()
 file.Close
 psPath = scriptDir & "\MiraQueue.ps1"
@@ -3256,68 +4555,55 @@ cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & psPath & ""
 Set shell = CreateObject("WScript.Shell")
 shell.Run cmd, 0, True
 "@
-    Set-Content -LiteralPath $script:HiddenWatchLauncherPath -Value $vbs -Encoding ASCII
+    [IO.File]::WriteAllText($script:HiddenWatchLauncherPath,$vbs,[Text.Encoding]::Unicode)
+}
+
+function Test-RuntimePathProtected {
+    param([string]$Path)
+    $full=[IO.Path]::GetFullPath($Path).TrimEnd('\')
+    foreach ($pair in @(Get-Pairs)) {
+        foreach ($root in @($pair.Source,(Resolve-DestinationPath $pair.Dest))) {
+            $protected=[IO.Path]::GetFullPath($root).TrimEnd('\')
+            if ($full -ieq $protected -or (Test-PathInsideRoot $protected $full)) { return $true }
+        }
+    }
+    return $false
+}
+
+function Remove-OwnedRuntimeData {
+    # Exact known filenames only. Unknown files, directories and shortcuts are never inferred as ours.
+    $paths=@($script:QueuePath,$script:QueueMetaPath,$script:LogPath,$script:ClearQueueRequestPath,$script:HiddenWatchLauncherPath,$script:ScriptDirPointerFile,$script:StopWatcherRequestPath)
+    $logName=[regex]::Escape([IO.Path]::GetFileName($script:LogPath))
+    foreach ($item in @(Get-ChildItem -LiteralPath $script:DataDir -File -Force -ErrorAction Stop)) {
+        if ($item.Name -match ('^'+$logName+'\.\d{8}-\d{6}\.old$')) { $paths += $item.FullName }
+    }
+    foreach ($path in $paths) {
+        if ([string]::IsNullOrWhiteSpace($path) -or (Test-RuntimePathProtected $path)) { continue }
+        if (Test-PathInsideRoot $script:DataDir $path) { Remove-OwnedPath $script:DataDir $path }
+    }
 }
 
 function Uninstall-Everything {
-    Show-Header "Uninstall Everything" "Program data only - sources and destinations are preserved"
-    if (-not (Test-IsAdministrator)) {
-        Write-Color "Administrator permission is required to remove scheduled tasks cleanly." "Yellow"
-        Write-Color "A UAC prompt will open now for this uninstall step only." "DarkGray"
-        Invoke-ElevatedMode "Uninstall"
-        Show-PostElevatedTaskStatus "Uninstall"
-        return
-    }
-    Write-Color "This removes scheduled tasks, queue, logs, runtime data, generated config, and app-created shortcuts." "Yellow"
-    Write-Color "It will NOT delete source files or backup destination files." "Green"
-    Write-Host ""
-    if (-not (Read-EnterOrEsc "Press Enter to uninstall everything, or Esc to cancel.")) { return }
-    $taskName = [string]$script:Config.TaskName
+    Show-Header 'Uninstall Everything' 'Owned runtime files only; backup content is preserved'
+    if (-not (Test-IsAdministrator)) { Invoke-ElevatedMode 'Uninstall'; return }
+    if (-not (Read-EnterOrEsc 'Remove the configured watcher, queue, logs and configuration?')) { return }
+    Stop-KnownWatcherProcesses
+    if (-not (Enter-ApplyLock -Operation 'Uninstall')) { return }
     try {
-        Stop-KnownWatcherProcesses
-        Remove-KnownScheduledTasks -KeepTaskName ""
-    } catch {}
-
-    $safeDataDir = [System.IO.Path]::GetFullPath($script:DataDir)
-    $localApp = [System.IO.Path]::GetFullPath($env:LOCALAPPDATA)
-    if (Test-Path -LiteralPath $safeDataDir) {
-        if ($safeDataDir.StartsWith($localApp, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Remove-Item -LiteralPath $safeDataDir -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Color ("Removed data folder: " + $safeDataDir) "Green"
-        } else {
-            foreach ($runtimeFile in @($script:QueuePath, $script:LogPath, $script:ApplyLockPath, $script:ClearQueueRequestPath, $script:HiddenWatchLauncherPath, $script:ScriptDirPointerFile)) {
-                if (Test-Path -LiteralPath $runtimeFile) {
-                    Remove-Item -LiteralPath $runtimeFile -Force -ErrorAction SilentlyContinue
-                    Write-Color ("Removed runtime file: " + $runtimeFile) "Green"
-                }
-            }
-            try {
-                if (@(Get-ChildItem -LiteralPath $safeDataDir -Force -ErrorAction SilentlyContinue).Count -eq 0) {
-                    Remove-Item -LiteralPath $safeDataDir -Force -ErrorAction SilentlyContinue
-                    Write-Color ("Removed empty data folder: " + $safeDataDir) "Green"
-                } else {
-                    Write-Color ("Data folder kept because it contains other files: " + $safeDataDir) "DarkYellow"
-                }
-            } catch {}
-        }
+        Remove-KnownScheduledTasks
+        $queueMutex=Enter-QueueMutex
+        if ($null -eq $queueMutex) { throw 'Uninstall cannot acquire queue lock' }
+        try { Remove-OwnedRuntimeData } finally { Exit-QueueMutex $queueMutex }
+        if (-not (Test-RuntimePathProtected $script:ConfigPath)) { Remove-OwnedPath $script:ScriptDir $script:ConfigPath }
+    } finally { Exit-ApplyLock }
+    # DataDir is never removed recursively, even under LOCALAPPDATA.
+    if (-not (Test-RuntimePathProtected $script:ApplyLockPath)) {
+        Remove-OwnedPath $script:DataDir $script:ApplyLockPath
     }
-
-    foreach ($shortcut in @(
-        (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\MiraQueue Backup.lnk"),
-        (Join-Path ([Environment]::GetFolderPath("Desktop")) "MiraQueue Backup.lnk")
-    )) {
-        if (Test-Path -LiteralPath $shortcut) {
-            Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
-            Write-Color ("Removed shortcut: " + $shortcut) "Green"
-        }
+    if ([IO.Directory]::Exists($script:DataDir) -and -not (Test-RuntimePathProtected $script:DataDir) -and @(Get-ChildItem -LiteralPath $script:DataDir -Force -ErrorAction Stop).Count -eq 0) {
+        [IO.Directory]::Delete($script:DataDir)
     }
-
-    if (Test-Path -LiteralPath $script:ConfigPath) {
-        Remove-Item -LiteralPath $script:ConfigPath -Force -ErrorAction SilentlyContinue
-        Write-Color ("Removed config: " + $script:ConfigPath) "Green"
-    }
-    Write-Host ""
-    Write-Color "Uninstall finished. Source and destination folders were not touched." "Green"
+    Write-Color 'Owned runtime files removed. Unrelated files and user-created shortcuts were preserved.' 'Green'
     Wait-Back
 }
 
@@ -3332,18 +4618,12 @@ function Test-IsAdministrator {
 }
 
 function Invoke-ElevatedMode {
-    param([ValidateSet("Install","RemoveTask","Uninstall")][string]$TargetMode)
+    param([ValidateSet('Install','RemoveTask','Uninstall')][string]$TargetMode)
     try {
-        $cmd = "title MiraQueue Backup Admin && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$script:ScriptPath`" -Mode $TargetMode -NoPause & timeout /t 3 /nobreak >nul"
-        $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/d /c `"$cmd`"" -Verb RunAs -Wait -PassThru
-        if ($proc.ExitCode -eq 0) {
-            Write-Color "Elevated step finished." "Green"
-        } else {
-            Write-Color ("Elevated step finished with exit code: " + $proc.ExitCode) "Yellow"
-        }
-    } catch {
-        Write-Color ("Could not start elevated PowerShell: " + $_.Exception.Message) "Red"
-    }
+        $arguments=ConvertTo-ProcessArgumentString @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:ScriptPath,'-Mode',$TargetMode,'-NoPause')
+        $process=Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+        Write-Color ("Elevated operation exit code: " + $process.ExitCode) 'Yellow'
+    } catch { Write-Color ("Elevation failed: " + $_.Exception.Message) 'Red' }
 }
 
 function Show-PostElevatedTaskStatus {
@@ -3351,7 +4631,7 @@ function Show-PostElevatedTaskStatus {
     Start-Sleep -Milliseconds 800
     Write-Host ""
     if ($Operation -eq "Install") {
-        $task = Get-ScheduledTask -TaskName ([string]$script:Config.TaskName) -ErrorAction SilentlyContinue
+        $task = Get-OwnedScheduledTask -TaskName ([string]$script:Config.TaskName)
         $watchers = @(Get-WatcherProcesses)
         if ($null -ne $task) {
             Write-Color ("Scheduled task: " + $task.TaskName + " / " + $task.State) $(if ($task.State -eq "Running") { "Green" } else { "Yellow" })
@@ -3364,7 +4644,7 @@ function Show-PostElevatedTaskStatus {
         return
     }
 
-    $remaining = @(Get-ScheduledTask -TaskName ([string]$script:Config.TaskName) -ErrorAction SilentlyContinue)
+    $remaining = @(Get-OwnedScheduledTask -TaskName ([string]$script:Config.TaskName))
     $watchers = @(Get-WatcherProcesses)
     if ($remaining.Count -eq 0 -and $watchers.Count -eq 0) {
         Write-Color "Scheduled watcher removed." "Green"
@@ -3377,18 +4657,13 @@ function Show-PostElevatedTaskStatus {
 }
 
 function Remove-KnownScheduledTasks {
-    param([string]$KeepTaskName = "")
-    $knownTaskNames = @(
-        [string]$script:Config.TaskName
-    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
-
-    foreach ($name in $knownTaskNames) {
-        if (-not [string]::IsNullOrWhiteSpace($KeepTaskName) -and $name -eq $KeepTaskName) { continue }
-        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if ($null -ne $task) {
-            Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop
-            Write-Color ("Removed scheduled task: " + $name) "Green"
-        }
+    param([string]$KeepTaskName = '')
+    $name=[string]$script:Config.TaskName
+    if ($name -eq $KeepTaskName) { return }
+    $task=Get-OwnedScheduledTask $name
+    if ($null -ne $task) {
+        Unregister-ScheduledTask -InputObject $task -Confirm:$false -ErrorAction Stop
+        Write-Color ("Removed scheduled task: " + $name) 'Green'
     }
 }
 
@@ -3430,7 +4705,7 @@ function Remove-ScheduledWatcherOnly {
     Stop-KnownWatcherProcesses
     Remove-KnownScheduledTasks -KeepTaskName ""
     if (Test-Path -LiteralPath $script:HiddenWatchLauncherPath) {
-        Remove-Item -LiteralPath $script:HiddenWatchLauncherPath -Force -ErrorAction SilentlyContinue
+        Remove-OwnedPath $script:DataDir $script:HiddenWatchLauncherPath
         Write-Color ("Removed hidden watcher launcher: " + $script:HiddenWatchLauncherPath) "Green"
     }
     Write-Host ""
@@ -3439,40 +4714,54 @@ function Remove-ScheduledWatcherOnly {
 }
 
 function Stop-KnownWatcherProcesses {
-    try {
-        $watchers = @(Get-WatcherProcesses)
-        foreach ($proc in $watchers) {
-            try {
-                Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
-                Write-Color ("Stopped watcher process: " + $proc.ProcessId) "Green"
-            } catch {}
-        }
-    } catch {}
+    $watchers=@(Get-WatcherProcesses)
+    if ($watchers.Count -eq 0) { return }
+    Write-AtomicText $script:StopWatcherRequestPath ([datetime]::UtcNow.ToString('o'))
+    $deadline=[datetime]::UtcNow.AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 200
+        $remaining=@(Get-WatcherProcesses)
+    } while ($remaining.Count -gt 0 -and [datetime]::UtcNow -lt $deadline)
+    if ($remaining.Count -gt 0) { throw 'Watcher is still flushing or scanning. Retry after it stops; no process was forcibly killed.' }
 }
 
 function Get-WatcherProcesses {
     try {
-        return @(Get-CimInstance Win32_Process | Where-Object {
-            $_.CommandLine -like '*MiraQueue.ps1*' -and
-            $_.CommandLine -like '*-Mode Watch*' -and
-            $_.ProcessId -ne $PID
+        $filePattern = '(?i)(?:^|\s)-File\s+(?:"' + [regex]::Escape($script:ScriptPath) + '"|' + [regex]::Escape($script:ScriptPath) + ')(?=\s|$)'
+        return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction Stop | Where-Object {
+            $_.CommandLine -match $filePattern -and $_.CommandLine -match '(?i)(?:^|\s)-Mode\s+"?Watch"?(?=\s|$)' -and $_.ProcessId -ne $PID
         })
-    } catch {
-        return @()
-    }
+    } catch { return @() }
+}
+
+function Test-OwnedScheduledTask {
+    param([object]$Task)
+    if ($null -eq $Task -or @($Task.Actions).Count -ne 1) { return $false }
+    $action=@($Task.Actions)[0]
+    $executable=[IO.Path]::GetFileName([string]$action.Execute)
+    return ($executable -ieq 'wscript.exe' -and ([string]$action.Arguments).Trim() -ceq ('"'+$script:HiddenWatchLauncherPath+'"'))
+}
+
+function Get-OwnedScheduledTask {
+    param([string]$TaskName)
+    $task=Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -ceq $TaskName } | Select-Object -First 1
+    if (Test-OwnedScheduledTask $task) { return $task }
+    return $null
 }
 
 function Test-AllDriveMapsOnline {
+    param([switch]$Fast)
     $allOnline = $true
     $offlineDrives = New-Object System.Collections.Generic.List[string]
     $seen = New-Object System.Collections.Generic.List[string]
     foreach ($pair in Get-Pairs) {
         try {
-            $root = [System.IO.Path]::GetPathRoot($pair.Dest)
+            $root = [System.IO.Path]::GetPathRoot((Resolve-DestinationPath $pair.Dest))
             if ([string]::IsNullOrWhiteSpace($root)) { continue }
             if ($seen.Contains($root)) { continue }
             $seen.Add($root) | Out-Null
-            if (-not (Test-Path -LiteralPath $root -ErrorAction SilentlyContinue)) {
+            $isOnline = if ($Fast) { Test-DestRootAvailableFast $pair.Dest } else { Test-Path -LiteralPath $root -ErrorAction SilentlyContinue }
+            if (-not $isOnline) {
                 $allOnline = $false
                 $offlineDrives.Add($root.TrimEnd('\')) | Out-Null
             }
@@ -3483,20 +4772,48 @@ function Test-AllDriveMapsOnline {
 
 function Show-MainMenu {
     while ($true) {
+        $pendingSnapshot = $null
+        $snapshotError = $null
+        try {
+            $pendingSnapshot = Sync-PendingSessionSnapshot -RefreshDestinations -ShowProgress -ReadOnly
+        } catch {
+            $snapshotError = $_
+        }
+        if ($null -eq $pendingSnapshot) {
+            Show-Header "Pending Status Error" "The destination status could not be prepared"
+            $errorMessage = if ($null -ne $snapshotError) { [string]$snapshotError.Exception.Message } else { "Snapshot returned no result." }
+            Write-Color ("Unable to check pending destinations: " + $errorMessage) "Red"
+            Write-Color "No drive was marked offline. The pending queue was left unchanged." "Yellow"
+            Write-Log "ERROR" ("Pending destination snapshot failed: " + $errorMessage)
+            Wait-Back
+            if ($script:SuppressPause) { return }
+            continue
+        }
         Show-Header
         Write-Color ("Config: " + $script:ConfigPath) "DarkGray"
+        $menuStatusSw = [Diagnostics.Stopwatch]::StartNew()
         $pairsCount = (Get-Pairs).Count
-        $qEntries = @(Read-QueueEntries)
-        $qLatest = @(Get-LatestQueueEntries $qEntries)
-        $qLatest = @(Remove-OrphanedUpserts $qLatest)
-        $qVisible = @(Get-VisiblePendingEntries $qLatest)
+        $queueMeta = $pendingSnapshot.Counts
         $watcherCount = @(Get-WatcherProcesses).Count
         $watcherStatus = if ($watcherCount -gt 0) { "RUN" } else { "STOP" }
-        $driveStatus = Test-AllDriveMapsOnline
+        $driveStatus = $pendingSnapshot.DriveStatus
+        $menuStatusSw.Stop()
+        if ($menuStatusSw.ElapsedMilliseconds -gt 300) {
+            Write-Log "PERF" ("Menu status took {0} ms" -f $menuStatusSw.ElapsedMilliseconds)
+        }
         $statusColor = if ($driveStatus.Online) { "Green" } else { "Red" }
-        Write-Color ("Pairs: $pairsCount    Pending: " + $qVisible.Count + "    Watcher: " + $watcherStatus) $statusColor
+        $pendingCount = [int]$queueMeta.EffectiveCount
+        Write-Color ("Pairs: $pairsCount    Pending: $pendingCount    Watcher: $watcherStatus") $statusColor
+        if ($pendingCount -gt 0) {
+            Write-Color "Changes: " "DarkGray" -NoNewLine
+            Write-Color ("Add " + [int]$queueMeta.AddCount) "Green" -NoNewLine
+            Write-Color ("    Update " + [int]$queueMeta.UpdateCount) "Cyan" -NoNewLine
+            Write-Color ("    Delete " + [int]$queueMeta.DeleteCount) "Red"
+        }
         if (-not $driveStatus.Online) {
-            Write-Color ("⚠  Drive " + ($driveStatus.OfflineDrives -join ", ") + " is not available") "Yellow"
+            $offlineNames = @($driveStatus.OfflineDrives | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $offlineText = if ($offlineNames.Count -gt 0) { $offlineNames -join ", " } else { "configured destination" }
+            Write-Color ("⚠  Drive " + $offlineText + " is not available") "Yellow"
         }
         Write-Color ("-" * 56) "DarkGray"
         Write-Color "[1] " "DarkGray" -NoNewLine; Write-Color "Apply Pending" "Yellow"
@@ -3515,8 +4832,8 @@ function Show-MainMenu {
         $choice = Read-KeyChoice
         if ($null -eq $choice) { return }
         switch ($choice) {
-            "1" { Invoke-ApplyPending }
-            "2" { Show-PendingPreview }
+            "1" { Invoke-ApplyPending -Snapshot $pendingSnapshot }
+            "2" { Show-PendingPreview -Snapshot $pendingSnapshot }
             "3" { Invoke-FullMirror }
             "4" { Manage-PathsMenu }
             "5" { Manage-ExclusionsMenu }
@@ -3528,17 +4845,19 @@ function Show-MainMenu {
     }
 }
 
-Initialize-App
+if ($MyInvocation.InvocationName -ne '.') {
+    Initialize-App -ReadOnly:($Mode -in @("PreviewPending","Status"))
 
-switch ($Mode) {
-    "Menu" { Show-MainMenu }
-    "Watch" { Start-Watcher }
-    "PreviewPending" { Show-PendingPreview }
-    "ApplyPending" { Invoke-ApplyPending }
-    "FullMirror" { Invoke-FullMirror }
-    "Status" { Show-Status }
-    "Install" { Install-Required }
-    "RemoveTask" { Remove-ScheduledWatcherOnly }
-    "Uninstall" { Uninstall-Everything }
+    switch ($Mode) {
+        "Menu" { Show-MainMenu }
+        "Watch" { Start-Watcher }
+        "PreviewPending" { $pendingSnapshot = Sync-PendingSessionSnapshot -RefreshDestinations -ShowProgress -ReadOnly; Show-PendingPreview -Snapshot $pendingSnapshot }
+        "ApplyPending" { $pendingSnapshot = Sync-PendingSessionSnapshot -RefreshDestinations -ShowProgress -ReadOnly; Invoke-ApplyPending -Snapshot $pendingSnapshot }
+        "FullMirror" { Invoke-FullMirror }
+        "Status" { Show-Status }
+        "Install" { Install-Required }
+        "RemoveTask" { Remove-ScheduledWatcherOnly }
+        "Uninstall" { Uninstall-Everything }
+    }
 }
 

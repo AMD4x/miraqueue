@@ -1,37 +1,29 @@
-# Complete Scenario Matrix
+# Scenario matrix — V2
 
-| Scenario | Trigger | MiraQueue Action | Result |
-| --- | --- | --- | --- |
-| First launch | No config exists | Create config and runtime queue | Main menu opens |
-| Invalid config | Malformed JSON | Show error and exit | No silent repair |
-| No pairs | Watch or Full Mirror selected | Show warning | No work starts |
-| Add pair | Source and destination entered | Normalize and save | Pair has exclusion keys |
-| Edit pair | Pair changed | Update pair and maps | Exclusions stay attached |
-| Remove pair | Pair selected | Remove config entry | Files untouched |
-| Global exclusion | Pattern added | Skip matching paths | All pairs affected |
-| Pair exclusion | Pattern added to one pair | Skip for that pair | Other pairs unchanged |
-| Created file | Watcher Created | Queue Upsert | Apply copies if needed |
-| Changed file | Watcher Changed | Queue Upsert | Apply copies if different |
-| Deleted file | Watcher Deleted | Queue Delete | Apply deletes when enabled |
-| Renamed file | Watcher Renamed | Queue old delete and new upsert | Rename reflected after apply |
-| Created directory | New folder appears | Queue folder and snapshot children | Nested items included |
-| Excluded event | Path matches exclusion | Drop event | Queue stays clean |
-| Burst events | Many quick changes | Debounce writes | Queue receives consolidated entries |
-| Clear queue | User confirms clear | Queue and buffer cleared | Pending work discarded |
-| Destination offline | Root unavailable | Skip or report error | User can reconnect |
-| Source missing | Queued source vanished | Fail copy entry | User can review |
-| Already current | Destination matches | Skip copy | No needless write |
-| Directory exists | MKDIR target exists | Skip mkdir | No error |
-| Delete disabled | Delete setting false | Skip delete | Destination preserved |
-| Strict preview | STRICT with preview | List comparison | No delete happens |
-| Strict apply | STRICT with apply | Mirror source to destination | Extras can be removed |
-| Update apply | UPDATE_KEEP_EXTRAS | Copy new and updated items | Extras remain |
-| Missing-only apply | MISSING_ONLY | Copy missing items only | Updates ignored |
-| Robocopy failure | Failure code | Report error | Failure count visible |
-| Install watcher | Install selected | Elevate and register task | Watcher starts at logon |
-| Restart watcher | Restart selected | Stop and start task | Config reloads |
-| Remove watcher | Remove selected | Unregister task | Config and queue remain |
-| Full uninstall | Confirmed uninstall | Remove generated runtime resources | User data preserved |
-| Status | Status selected | Show health data | User can diagnose |
-| Log rotation | Log grows large | Move old log | Runtime stays bounded |
-| Temp cleanup | Old internal temp file | Remove eligible file only | Unrelated files preserved |
+| Scenario | Result |
+| --- | --- |
+| V1 config / queue | Preserve user values/IDs; add defaults and schema fields |
+| Reopen after migration | No destructive repeat normalization |
+| Malformed / future queue schema | Stop and preserve bytes |
+| Concurrent queue writers | No lost successful commits |
+| New event during scan/apply | Newer ID survives |
+| Source create/change/rename | Queue appropriate effective decision |
+| Case-only rename | One case-insensitive upsert; no delete. Matching content may retain the destination spelling. |
+| Source restored after delete queued | Reclassify; copy restored directory children |
+| Source root unavailable | Preserve backup and pending work |
+| Destination offline / permission denied | Error is not absence |
+| Preview Pending | Queue, metadata and destination unchanged |
+| Apply Pending | Acknowledge successes only |
+| Delete disabled | Retain pending and backup |
+| Excluded descendant in deleted directory | Block parent deletion |
+| Junction / traversal / root overlap | Reject operation |
+| Parallel transfers | Bounded workers, matching content hashes |
+| Staged tree / existing destination | Publish or merge; preserve extras/exclusions |
+| STRICT | New + updates + verified extras deletion |
+| UPDATE_KEEP_EXTRAS | New + updates; retain extras |
+| MISSING_ONLY | New only; preserve targets appearing after preview |
+| Clear queue / newer event | Keep work newer than cutoff |
+| Corrupt metadata | Rebuild from valid queue |
+| Uninstall shared DataDir | Remove allowlist; retain unknown files |
+| Same-name unrelated task | Never remove it |
+| Forced process kill / power failure | Possible unflushed events/abandoned stage |

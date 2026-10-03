@@ -14,7 +14,9 @@ MiraQueue.scriptdir.txt
 *.crdownload
 *.part
 *.download
-*.mbtmp-*
+*.mqtmp-*
+*.mqbackup-*
+*.mqdirtemp-*
 
 # Local editor and OS files
 .vscode/
@@ -24,3 +26,8 @@ MiraQueue.scriptdir.txt
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# V2 runtime metadata and graceful watcher stop
+MiraQueue.queue.meta.json
+MiraQueue.stop-watch
+*.replace.bak

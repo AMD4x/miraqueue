@@ -1,13 +1,7 @@
-# Security Policy
+# Security policy
 
-## Supported Version
+This policy covers MiraQueue V2.0.0.
 
-MiraQueue V1.0.0 is the initial supported release.
+For sensitive reports, contact the repository owner privately before posting details. Include Windows/PowerShell/product versions and a minimal reproduction using temporary data. Review logs and config for private paths before sharing.
 
-## Reporting Issues
-
-For sensitive reports, contact the repository owner privately before posting public details. Include Windows version, PowerShell version, MiraQueue version, and a short reproduction path.
-
-## Operational Safety
-
-MiraQueue can copy and delete destination files depending on selected actions and policies. Treat configuration files and destination paths as sensitive operational data. Review previews before applying changes, especially with strict full mirror mode.
+The application can permanently replace/delete destination content after explicit apply. Treat config and pending records as operational data. See [safety boundaries](docs/safety.md).

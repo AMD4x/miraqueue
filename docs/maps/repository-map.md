@@ -1,17 +1,11 @@
-# Repository Map
+# Repository map
 
 ```mermaid
-graph TD
-  A[repo] --> B[MiraQueue.ps1]
-  A --> C[Start_MiraQueue.cmd]
-  A --> D[docs]
-  A --> E[examples]
-  A --> F[LICENSE]
-  A --> G[CHANGELOG.md]
-  A --> H[SECURITY.md]
-  D --> I[maps]
-  D --> J[explanation]
-  D --> K[media]
+flowchart TD
+  R[Repository] --> A[MiraQueue.ps1 and CMD launcher]
+  R --> D[docs: guides, maps, explanations, media]
+  R --> E[examples: public JSON]
+  R --> H[CHANGELOG, LICENSE, SECURITY]
 ```
 
-The public repo contains the end-user script, launcher, documentation, example configuration, license, release history, and security guidance.
+Only application files and Windows built-ins are runtime dependencies. Config, queue and logs are generated locally and ignored by Git.

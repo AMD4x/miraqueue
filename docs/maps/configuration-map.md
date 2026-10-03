@@ -1,16 +1,14 @@
-# Configuration Map
+# Configuration map
 
 ```mermaid
-graph TD
-  A[New-DefaultConfig] --> B[Initialize-App]
+flowchart TD
+  A[Initialize-App] --> B[Load existing JSON or defaults]
   B --> C[Ensure-ConfigShape]
-  C --> D[Pairs]
-  C --> E[DriveMaps]
-  C --> F[Exclusions]
-  D --> G[Save-Config]
-  E --> G
-  F --> G
-  G --> H[Refresh watcher when installed]
+  C --> D[Preserve user settings and add missing defaults]
+  D --> E[Validate runtime names and DataDir]
+  E --> F[Initialize or read existing storage]
+  G[Explicit config edit] --> H[Write-AtomicText]
+  H --> I[Invalidate snapshot and refresh watcher]
 ```
 
-Configuration repair keeps old or partial config files usable within V1.0.0 shape.
+Loading a V1 config does not rewrite it. Explicit saves persist V2 defaults/version while retaining unknown user fields. PreviewPending/Status use read-only initialization. See [configuration](../configuration.md).

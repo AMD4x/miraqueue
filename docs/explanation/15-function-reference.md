@@ -1,2658 +1,1589 @@
-﻿# Complete Function Reference
+# Complete function reference — V2.0.0
 
-This expanded reference documents every function in `MiraQueue.ps1`. Each entry explains where the function sits in the backup workflow, what state it depends on, what it may change, how it fails safely, and why it exists as a separate unit.
+Total functions documented: 198.
 
-Total functions documented: 156.
+Function inventory from the PowerShell AST. Source links and parameter lists are exact. Calls list direct internal PowerShell command references; .NET calls and dynamically launched runspace code are not a complete call graph. Read the linked workflow guides for contracts spanning multiple functions.
 
 ### Expand-TextPath
 
-- **Lines:** 34-39
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Expands environment variables in user-facing paths before the rest of the script treats them as concrete filesystem locations.
+Expands environment variables in user-facing paths before the rest of the script treats them as concrete filesystem locations.
 
-`Expand-TextPath` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Path`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Expand-TextPath` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:46](../../MiraQueue.ps1#L46)
+- Parameters: `Path`.
+- Direct internal calls: none.
 
 ### New-DefaultConfig
 
-- **Lines:** 40-82
-- **Area:** Configuration and settings
-- **Primary role:** Defines the canonical V1.0.0 configuration shape, including runtime names, safety defaults, robocopy tuning, exclusions, drive maps, and backup pairs.
+Returns the neutral V2.0.0 defaults. Queue schema version is a separate contract.
 
-`New-DefaultConfig` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
+- Source: [MiraQueue.ps1:52](../../MiraQueue.ps1#L52)
+- Parameters: none.
+- Direct internal calls: none.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
+### Write-AtomicText
 
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
+Writes a same-directory temporary UTF-8 file, atomically replaces the target and cleans the temporary file in finally.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `New-DefaultConfig` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:96](../../MiraQueue.ps1#L96)
+- Parameters: `Path`, `Text`.
+- Direct internal calls: none.
 
 ### Save-Config
 
-- **Lines:** 83-94
-- **Area:** Configuration and settings
-- **Primary role:** Persists the in-memory configuration and then asks any installed watcher to reload the new state.
+Atomically persists validated configuration, invalidates the snapshot and refreshes the owned watcher.
 
-`Save-Config` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Save-Config` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** Notable internal calls: `Refresh-WatcherAfterConfigChange`, `Ensure-AllPairExclusionKeys`, `Write-Color`, `Write-Log`.
+- Source: [MiraQueue.ps1:106](../../MiraQueue.ps1#L106)
+- Parameters: none.
+- Direct internal calls: `Ensure-ConfigShape`, `Refresh-WatcherAfterConfigChange`, `Write-AtomicText`, `Write-Log`.
 
 ### Refresh-WatcherAfterConfigChange
 
-- **Lines:** 95-122
-- **Area:** Configuration and settings
-- **Primary role:** Coordinates watcher restart after config edits so changed paths or settings are picked up without asking the user to find the process manually.
+Coordinates watcher restart after config edits so changed paths or settings are picked up without asking the user to find the process manually.
 
-`Refresh-WatcherAfterConfigChange` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Refresh-WatcherAfterConfigChange` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** Notable internal calls: `Wait-ScheduledTaskNotRunning`, `Wait-ScheduledWatcherStarted`, `Write-Color`, `Write-Log`, `Stop-KnownWatcherProcesses`, `Get-WatcherProcesses`.
+- Source: [MiraQueue.ps1:114](../../MiraQueue.ps1#L114)
+- Parameters: none.
+- Direct internal calls: `Get-OwnedScheduledTask`, `Get-WatcherProcesses`, `Stop-KnownWatcherProcesses`, `Wait-ScheduledTaskNotRunning`, `Wait-ScheduledWatcherStarted`, `Write-Color`, `Write-Log`.
 
 ### Wait-ScheduledTaskNotRunning
 
-- **Lines:** 123-137
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Provides the w ai t s ch ed ul ed ta sk no tr un ni ng helper behavior used by nearby workflows.
+Polls the owned task until it stops or the retry limit is reached.
 
-`Wait-ScheduledTaskNotRunning` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `TaskName`, `Attempts`, `DelayMs`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Wait-ScheduledTaskNotRunning` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:142](../../MiraQueue.ps1#L142)
+- Parameters: `TaskName`, `Attempts`, `DelayMs`.
+- Direct internal calls: `Get-OwnedScheduledTask`.
 
 ### Wait-ScheduledWatcherStarted
 
-- **Lines:** 138-153
-- **Area:** Watcher lifecycle and file system events
-- **Primary role:** Provides the w ai t s ch ed ul ed wa tc he rs ta rt ed helper behavior used by nearby workflows.
+Polls the owned task and watcher processes until startup is observed or the retry limit is reached.
 
-`Wait-ScheduledWatcherStarted` belongs to the **Watcher lifecycle and file system events** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, FileSystemWatcher events, debounce timing, exclusions, and the watcher mutex.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `TaskName`, `Attempts`, `DelayMs`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It may participate in long-running watcher state, but the watcher contract remains queue-only: it records work and does not apply file changes. The important failure mode is event bursts or missed nested directory events. Debounce buffering and directory snapshots reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Wait-ScheduledWatcherStarted` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** manual or scheduled watch mode, created/changed/deleted/renamed events, and directory snapshots.
-- **Dependency notes:** Notable internal calls: `Get-WatcherProcesses`.
+- Source: [MiraQueue.ps1:157](../../MiraQueue.ps1#L157)
+- Parameters: `TaskName`, `Attempts`, `DelayMs`.
+- Direct internal calls: `Get-OwnedScheduledTask`, `Get-WatcherProcesses`.
 
 ### Initialize-App
 
-- **Lines:** 154-193
-- **Area:** Shared core helper
-- **Primary role:** Bootstraps the application by loading or creating config, repairing shape, resolving runtime files, and preparing queue/log storage.
+Loads config, validates runtime paths and initializes queue storage; ReadOnly skips file creation and migration.
 
-`Initialize-App` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Initialize-App` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** Notable internal calls: `Expand-TextPath`, `New-DefaultConfig`, `Ensure-ConfigShape`, `Rotate-LogIfNeeded`.
+- Source: [MiraQueue.ps1:173](../../MiraQueue.ps1#L173)
+- Parameters: `ReadOnly`.
+- Direct internal calls: `Assert-NoReparsePath`, `Ensure-ConfigShape`, `Enter-QueueMutex`, `Exit-QueueMutex`, `Expand-TextPath`, `Initialize-QueueStorage`, `New-DefaultConfig`, `Rotate-LogIfNeeded`, `Test-RuntimePathProtected`, `Write-AtomicText`.
 
 ### Ensure-ConfigShape
 
-- **Lines:** 194-207
-- **Area:** Configuration and settings
-- **Primary role:** Provides the e ns ur e c on fi gs ha pe helper behavior used by nearby workflows.
+Adds missing defaults while preserving user settings; validates identity/runtime fields and bounds file concurrency.
 
-`Ensure-ConfigShape` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Ensure-ConfigShape` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** Notable internal calls: `New-DefaultConfig`, `Ensure-AllPairExclusionKeys`.
+- Source: [MiraQueue.ps1:229](../../MiraQueue.ps1#L229)
+- Parameters: none.
+- Direct internal calls: `Ensure-AllPairExclusionKeys`, `Get-Pairs`, `New-DefaultConfig`, `Normalize-QueueRelPath`.
 
 ### Get-Array
 
-- **Lines:** 208-216
-- **Area:** Configuration and settings
-- **Primary role:** Calculates or formats g et a rr ay data for callers that need a stable value instead of duplicating the logic.
+Normalizes null, scalar and collection values for array-based callers.
 
-`Get-Array` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Value`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-Array` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:266](../../MiraQueue.ps1#L266)
+- Parameters: `Value`.
+- Direct internal calls: none.
 
 ### Get-Pairs
 
-- **Lines:** 217-220
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Calculates or formats g et p ai rs data for callers that need a stable value instead of duplicating the logic.
+Returns the configured source/destination pairs.
 
-`Get-Pairs` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-Pairs` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Get-Array`.
+- Source: [MiraQueue.ps1:275](../../MiraQueue.ps1#L275)
+- Parameters: none.
+- Direct internal calls: `Get-Array`.
 
 ### Set-Pairs
 
-- **Lines:** 221-226
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the s et p ai rs state in one named place so the rest of the script does not duplicate update rules.
+Replaces the in-memory pair list and ensures its exclusion keys exist.
 
-`Set-Pairs` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Pairs`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Set-Pairs` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Ensure-AllPairExclusionKeys`.
+- Source: [MiraQueue.ps1:279](../../MiraQueue.ps1#L279)
+- Parameters: `Pairs`.
+- Direct internal calls: `Ensure-AllPairExclusionKeys`.
 
 ### Get-MapArray
 
-- **Lines:** 227-235
-- **Area:** Configuration and settings
-- **Primary role:** Calculates or formats g et m ap ar ra y data for callers that need a stable value instead of duplicating the logic.
+Reads an array from a named configuration map, returning an empty array for a missing key.
 
-`Get-MapArray` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `MapName`, `Key`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-MapArray` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** Notable internal calls: `Get-Array`.
+- Source: [MiraQueue.ps1:285](../../MiraQueue.ps1#L285)
+- Parameters: `MapName`, `Key`.
+- Direct internal calls: `Get-Array`.
 
 ### Set-MapArray
 
-- **Lines:** 236-245
-- **Area:** Configuration and settings
-- **Primary role:** Mutates the s et m ap ar ra y state in one named place so the rest of the script does not duplicate update rules.
+Creates or replaces an array entry in a named configuration map.
 
-`Set-MapArray` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `MapName`, `Key`, `Values`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Set-MapArray` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:294](../../MiraQueue.ps1#L294)
+- Parameters: `MapName`, `Key`, `Values`.
+- Direct internal calls: none.
 
 ### Ensure-AllPairExclusionKeys
 
-- **Lines:** 246-257
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Provides the e ns ur e a ll pa ir ex cl us io nk ey s helper behavior used by nearby workflows.
+Adds missing directory and file exclusion arrays for each configured pair.
 
-`Ensure-AllPairExclusionKeys` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Ensure-AllPairExclusionKeys` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`, `Set-MapArray`.
+- Source: [MiraQueue.ps1:304](../../MiraQueue.ps1#L304)
+- Parameters: none.
+- Direct internal calls: `Get-Pairs`, `Set-MapArray`.
 
 ### Write-Color
 
-- **Lines:** 258-263
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the w ri te c ol or helper behavior used by nearby workflows.
+Writes console text in the requested color, optionally without a newline.
 
-`Write-Color` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Text`, `Color`, `NoNewLine`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Write-Color` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:316](../../MiraQueue.ps1#L316)
+- Parameters: `Text`, `Color`, `NoNewLine`.
+- Direct internal calls: none.
 
 ### Write-Log
 
-- **Lines:** 264-273
-- **Area:** Shared core helper
-- **Primary role:** Provides the w ri te l og helper behavior used by nearby workflows.
+Appends a timestamped log entry after rotation; logging failures do not interrupt file operations.
 
-`Write-Log` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Level`, `Message`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Write-Log` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** Notable internal calls: `Rotate-LogIfNeeded`.
+- Source: [MiraQueue.ps1:322](../../MiraQueue.ps1#L322)
+- Parameters: `Level`, `Message`.
+- Direct internal calls: `Rotate-LogIfNeeded`.
 
 ### Rotate-LogIfNeeded
 
-- **Lines:** 274-292
-- **Area:** Shared core helper
-- **Primary role:** Provides the r ot at e l og if ne ed ed helper behavior used by nearby workflows.
+Rotates logs above 4 MiB and expires only timestamped rotations of this configured log basename.
 
-`Rotate-LogIfNeeded` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Rotate-LogIfNeeded` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:332](../../MiraQueue.ps1#L332)
+- Parameters: none.
+- Direct internal calls: `Remove-OwnedPath`.
 
 ### Clear-Screen
 
-- **Lines:** 293-296
-- **Area:** Console interface and progress display
-- **Primary role:** Mutates the c le ar s cr ee n state in one named place so the rest of the script does not duplicate update rules.
+Clears the console when the host supports it.
 
-`Clear-Screen` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Clear-Screen` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:347](../../MiraQueue.ps1#L347)
+- Parameters: none.
+- Direct internal calls: none.
 
 ### Center-Text
 
-- **Lines:** 297-304
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the c en te r t ex t helper behavior used by nearby workflows.
+Pads text to center it within a requested width.
 
-`Center-Text` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Text`, `Width`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Center-Text` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:351](../../MiraQueue.ps1#L351)
+- Parameters: `Text`, `Width`.
+- Direct internal calls: none.
 
 ### Fit-Cell
 
-- **Lines:** 305-312
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the f it c el l helper behavior used by nearby workflows.
+Truncates or pads text to fit a table column.
 
-`Fit-Cell` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Text`, `Width`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Fit-Cell` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:359](../../MiraQueue.ps1#L359)
+- Parameters: `Text`, `Width`.
+- Direct internal calls: none.
 
 ### Write-BoxHeader
 
-- **Lines:** 313-327
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the w ri te b ox he ad er helper behavior used by nearby workflows.
+Renders a bordered title and optional subtitle.
 
-`Write-BoxHeader` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Title`, `Subtitle`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Write-BoxHeader` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Center-Text`.
+- Source: [MiraQueue.ps1:367](../../MiraQueue.ps1#L367)
+- Parameters: `Title`, `Subtitle`.
+- Direct internal calls: `Center-Text`, `Write-Color`.
 
 ### Show-Header
 
-- **Lines:** 328-334
-- **Area:** Console interface and progress display
-- **Primary role:** Presents the s ho w h ea de r screen or menu and keeps display concerns separate from lower-level operations.
+Clears the screen and renders the application header.
 
-`Show-Header` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Title`, `Subtitle`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-Header` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Clear-Screen`, `Write-BoxHeader`.
+- Source: [MiraQueue.ps1:382](../../MiraQueue.ps1#L382)
+- Parameters: `Title`, `Subtitle`.
+- Direct internal calls: `Clear-Screen`, `Write-BoxHeader`.
 
 ### Show-SpinnerLine
 
-- **Lines:** 335-344
-- **Area:** Console interface and progress display
-- **Primary role:** Presents the s ho w s pi nn er li ne screen or menu and keeps display concerns separate from lower-level operations.
+Updates a console spinner and its status message.
 
-`Show-SpinnerLine` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Text`, `Cycles`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-SpinnerLine` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:389](../../MiraQueue.ps1#L389)
+- Parameters: `Text`, `Cycles`.
+- Direct internal calls: none.
 
 ### Get-ConsoleWidthSafe
 
-- **Lines:** 345-356
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et c on so le wi dt hs af e data for callers that need a stable value instead of duplicating the logic.
+Reads the console width with a fallback for hosts that do not expose it.
 
-`Get-ConsoleWidthSafe` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ConsoleWidthSafe` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:399](../../MiraQueue.ps1#L399)
+- Parameters: none.
+- Direct internal calls: none.
 
 ### Format-ByteSize
 
-- **Lines:** 357-372
-- **Area:** Shared core helper
-- **Primary role:** Calculates or formats f or ma t b yt es iz e data for callers that need a stable value instead of duplicating the logic.
+Formats byte counts with a readable size unit.
 
-`Format-ByteSize` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Bytes`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Format-ByteSize` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:411](../../MiraQueue.ps1#L411)
+- Parameters: `Bytes`.
+- Direct internal calls: none.
 
 ### Format-ByteSpeed
 
-- **Lines:** 373-378
-- **Area:** Shared core helper
-- **Primary role:** Calculates or formats f or ma t b yt es pe ed data for callers that need a stable value instead of duplicating the logic.
+Formats transfer speed as a byte size per second.
 
-`Format-ByteSpeed` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `BytesPerSecond`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Format-ByteSpeed` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** Notable internal calls: `Format-ByteSize`.
+- Source: [MiraQueue.ps1:427](../../MiraQueue.ps1#L427)
+- Parameters: `BytesPerSecond`.
+- Direct internal calls: `Format-ByteSize`.
 
 ### Format-CompactDuration
 
-- **Lines:** 379-387
-- **Area:** Shared core helper
-- **Primary role:** Calculates or formats f or ma t c om pa ct du ra ti on data for callers that need a stable value instead of duplicating the logic.
+Formats elapsed or remaining time for progress displays.
 
-`Format-CompactDuration` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Seconds`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Format-CompactDuration` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:433](../../MiraQueue.ps1#L433)
+- Parameters: `Seconds`.
+- Direct internal calls: none.
 
 ### Format-ApplyProgressBar
 
-- **Lines:** 388-398
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats f or ma t a pp ly pr og re ss ba r data for callers that need a stable value instead of duplicating the logic.
+Builds a fixed-width progress bar from a percentage.
 
-`Format-ApplyProgressBar` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Percent`, `Width`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Format-ApplyProgressBar` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:442](../../MiraQueue.ps1#L442)
+- Parameters: `Percent`, `Width`.
+- Direct internal calls: none.
 
 ### Get-ApplyProgressLayout
 
-- **Lines:** 399-456
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss la yo ut data for callers that need a stable value instead of duplicating the logic.
+Chooses progress column widths for the available console width.
 
-`Get-ApplyProgressLayout` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressLayout` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Get-ConsoleWidthSafe`.
+- Source: [MiraQueue.ps1:453](../../MiraQueue.ps1#L453)
+- Parameters: none.
+- Direct internal calls: `Get-ConsoleWidthSafe`.
 
 ### Get-ApplyEntryTotalBytes
 
-- **Lines:** 457-465
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Calculates or formats g et a pp ly en tr yt ot al by te s data for callers that need a stable value instead of duplicating the logic.
+Returns the byte total for a file or grouped directory transfer.
 
-`Get-ApplyEntryTotalBytes` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyEntryTotalBytes` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:515](../../MiraQueue.ps1#L515)
+- Parameters: `Entry`.
+- Direct internal calls: none.
 
 ### Get-ApplyProgressPercent
 
-- **Lines:** 466-474
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss pe rc en t data for callers that need a stable value instead of duplicating the logic.
+Calculates the displayed completion percentage for a progress row.
 
-`Get-ApplyProgressPercent` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Row`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressPercent` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:526](../../MiraQueue.ps1#L526)
+- Parameters: `Row`.
+- Direct internal calls: none.
 
 ### Get-ApplyProgressSizeText
 
-- **Lines:** 475-480
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss si ze te xt data for callers that need a stable value instead of duplicating the logic.
+Formats copied and total byte counts for a progress row.
 
-`Get-ApplyProgressSizeText` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Row`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressSizeText` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Format-ByteSize`.
+- Source: [MiraQueue.ps1:535](../../MiraQueue.ps1#L535)
+- Parameters: `Row`.
+- Direct internal calls: `Format-ByteSize`.
 
 ### Get-ApplyProgressTiming
 
-- **Lines:** 481-499
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss ti mi ng data for callers that need a stable value instead of duplicating the logic.
+Calculates transfer speed and estimated remaining time for a progress row.
 
-`Get-ApplyProgressTiming` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Row`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressTiming` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Format-ByteSpeed`, `Format-CompactDuration`.
+- Source: [MiraQueue.ps1:541](../../MiraQueue.ps1#L541)
+- Parameters: `Row`.
+- Direct internal calls: `Format-ByteSpeed`, `Format-CompactDuration`.
 
 ### Get-ApplyStatusColor
 
-- **Lines:** 500-522
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly st at us co lo r data for callers that need a stable value instead of duplicating the logic.
+Selects a console color for an apply status.
 
-`Get-ApplyStatusColor` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `StatusOrRow`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyStatusColor` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:561](../../MiraQueue.ps1#L561)
+- Parameters: `StatusOrRow`.
+- Direct internal calls: none.
 
 ### Format-ApplyProgressRow
 
-- **Lines:** 523-539
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats f or ma t a pp ly pr og re ss ro w data for callers that need a stable value instead of duplicating the logic.
+Formats one progress row using the current column layout.
 
-`Format-ApplyProgressRow` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Table`, `Row`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Format-ApplyProgressRow` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Fit-Cell`, `Format-ApplyProgressBar`, `Get-ApplyProgressPercent`, `Get-ApplyProgressSizeText`, `Get-ApplyProgressTiming`.
+- Source: [MiraQueue.ps1:584](../../MiraQueue.ps1#L584)
+- Parameters: `Table`, `Row`.
+- Direct internal calls: `Fit-Cell`, `Format-ApplyProgressBar`, `Get-ApplyProgressPercent`, `Get-ApplyProgressSizeText`, `Get-ApplyProgressTiming`.
 
 ### Write-ApplyProgressLine
 
-- **Lines:** 540-545
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the w ri te a pp ly pr og re ss li ne helper behavior used by nearby workflows.
+Writes a progress line with its selected color.
 
-`Write-ApplyProgressLine` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Text`, `Color`, `Width`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Write-ApplyProgressLine` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Write-Color`.
+- Source: [MiraQueue.ps1:601](../../MiraQueue.ps1#L601)
+- Parameters: `Text`, `Color`, `Width`.
+- Direct internal calls: `Write-Color`.
 
 ### Get-ApplyProgressBorder
 
-- **Lines:** 546-552
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss bo rd er data for callers that need a stable value instead of duplicating the logic.
+Builds a border matching the progress table column widths.
 
-`Get-ApplyProgressBorder` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Layout`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressBorder` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:607](../../MiraQueue.ps1#L607)
+- Parameters: `Layout`.
+- Direct internal calls: none.
 
 ### Get-ApplyProgressHeaderRow
 
-- **Lines:** 553-566
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss he ad er ro w data for callers that need a stable value instead of duplicating the logic.
+Builds the progress table column headings.
 
-`Get-ApplyProgressHeaderRow` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Layout`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressHeaderRow` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Center-Text`.
+- Source: [MiraQueue.ps1:614](../../MiraQueue.ps1#L614)
+- Parameters: `Layout`.
+- Direct internal calls: `Center-Text`.
 
 ### Get-ApplyProgressSummary
 
-- **Lines:** 567-578
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss su mm ar y data for callers that need a stable value instead of duplicating the logic.
+Summarizes overall progress across the transfer rows.
 
-`Get-ApplyProgressSummary` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Table`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressSummary` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:628](../../MiraQueue.ps1#L628)
+- Parameters: `Table`.
+- Direct internal calls: none.
 
 ### Get-ApplyProgressQueuedStatus
 
-- **Lines:** 579-585
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss qu eu ed st at us data for callers that need a stable value instead of duplicating the logic.
+Selects the initial queued status for a transfer entry.
 
-`Get-ApplyProgressQueuedStatus` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressQueuedStatus` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:640](../../MiraQueue.ps1#L640)
+- Parameters: `Entry`.
+- Direct internal calls: none.
 
 ### Test-ApplyProgressEntryVisible
 
-- **Lines:** 586-592
-- **Area:** Console interface and progress display
-- **Primary role:** Evaluates the t es t a pp ly pr og re ss en tr yv is ib le condition and lets the caller choose a safe branch based on a clear result.
+Checks whether an entry belongs to the selected progress display set.
 
-`Test-ApplyProgressEntryVisible` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`, `VisibleEntryKeys`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-ApplyProgressEntryVisible` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Get-QueueEntryKey`.
+- Source: [MiraQueue.ps1:647](../../MiraQueue.ps1#L647)
+- Parameters: `Entry`, `VisibleEntryKeys`.
+- Direct internal calls: `Get-QueueEntryKey`.
 
 ### New-ApplyProgressRow
 
-- **Lines:** 593-609
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the n ew a pp ly pr og re ss ro w helper behavior used by nearby workflows.
+Creates the initial display state and byte counters for a transfer entry.
 
-`New-ApplyProgressRow` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`, `No`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `New-ApplyProgressRow` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Get-ApplyEntryTotalBytes`, `Get-ApplyProgressQueuedStatus`.
+- Source: [MiraQueue.ps1:654](../../MiraQueue.ps1#L654)
+- Parameters: `Entry`, `No`.
+- Direct internal calls: `Get-ApplyEntryTotalBytes`, `Get-ApplyProgressQueuedStatus`.
 
 ### Get-ApplyProgressVisibleCount
 
-- **Lines:** 610-625
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss vi si bl ec ou nt data for callers that need a stable value instead of duplicating the logic.
+Limits the number of visible progress rows to the available console height.
 
-`Get-ApplyProgressVisibleCount` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `TotalRows`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressVisibleCount` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:676](../../MiraQueue.ps1#L676)
+- Parameters: `TotalRows`.
+- Direct internal calls: none.
 
 ### Get-ApplyProgressVisibleStart
 
-- **Lines:** 626-638
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss vi si bl es ta rt data for callers that need a stable value instead of duplicating the logic.
+Selects a viewport start that includes the current progress row.
 
-`Get-ApplyProgressVisibleStart` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Table`, `CurrentIndex`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressVisibleStart` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:692](../../MiraQueue.ps1#L692)
+- Parameters: `Table`, `CurrentIndex`.
+- Direct internal calls: none.
 
 ### Write-ApplyProgressAtLine
 
-- **Lines:** 639-647
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the w ri te a pp ly pr og re ss at li ne helper behavior used by nearby workflows.
+Writes progress text at a specified console line.
 
-`Write-ApplyProgressAtLine` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Line`, `Text`, `Color`, `Width`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Write-ApplyProgressAtLine` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:712](../../MiraQueue.ps1#L712)
+- Parameters: `Line`, `Text`, `Color`, `Width`.
+- Direct internal calls: none.
 
 ### Redraw-ApplyProgressViewport
 
-- **Lines:** 648-683
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the r ed ra w a pp ly pr og re ss vi ew po rt helper behavior used by nearby workflows.
+Redraws the visible progress rows and their table frame.
 
-`Redraw-ApplyProgressViewport` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Table`, `Initial`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Redraw-ApplyProgressViewport` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Get-ApplyStatusColor`, `Format-ApplyProgressRow`, `Write-ApplyProgressLine`, `Get-ApplyProgressBorder`, `Get-ApplyProgressHeaderRow`, `Get-ApplyProgressSummary`, `Write-ApplyProgressAtLine`.
+- Source: [MiraQueue.ps1:721](../../MiraQueue.ps1#L721)
+- Parameters: `Table`, `Initial`.
+- Direct internal calls: `Format-ApplyProgressRow`, `Get-ApplyProgressBorder`, `Get-ApplyProgressHeaderRow`, `Get-ApplyProgressSummary`, `Get-ApplyStatusColor`, `Write-ApplyProgressAtLine`, `Write-ApplyProgressLine`.
 
 ### New-ApplyProgressTable
 
-- **Lines:** 684-718
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the n ew a pp ly pr og re ss ta bl e helper behavior used by nearby workflows.
+Initializes the progress table layout, rows and viewport state.
 
-`New-ApplyProgressTable` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entries`, `VisibleEntryKeys`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `New-ApplyProgressTable` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Get-ApplyProgressLayout`, `Test-ApplyProgressEntryVisible`, `New-ApplyProgressRow`, `Get-ApplyProgressVisibleCount`, `Redraw-ApplyProgressViewport`.
+- Source: [MiraQueue.ps1:757](../../MiraQueue.ps1#L757)
+- Parameters: `Entries`, `VisibleEntryKeys`.
+- Direct internal calls: `Get-ApplyProgressLayout`, `Get-ApplyProgressVisibleCount`, `New-ApplyProgressRow`, `Redraw-ApplyProgressViewport`, `Test-ApplyProgressEntryVisible`.
 
 ### Add-ApplyProgressVisibleRow
 
-- **Lines:** 719-736
-- **Area:** Console interface and progress display
-- **Primary role:** Mutates the a dd a pp ly pr og re ss vi si bl er ow state in one named place so the rest of the script does not duplicate update rules.
+Adds a transfer row to the progress display.
 
-`Add-ApplyProgressVisibleRow` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Table`, `EntryIndex`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Add-ApplyProgressVisibleRow` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `New-ApplyProgressRow`, `Get-ApplyProgressVisibleCount`, `Redraw-ApplyProgressViewport`.
+- Source: [MiraQueue.ps1:792](../../MiraQueue.ps1#L792)
+- Parameters: `Table`, `EntryIndex`.
+- Direct internal calls: `Get-ApplyProgressVisibleCount`, `New-ApplyProgressRow`, `Redraw-ApplyProgressViewport`.
 
 ### Resolve-ApplyProgressRowIndex
 
-- **Lines:** 737-753
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the r es ol ve a pp ly pr og re ss ro wi nd ex helper behavior used by nearby workflows.
+Finds the progress row corresponding to a transfer entry.
 
-`Resolve-ApplyProgressRowIndex` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Table`, `Index`, `ShowIfHidden`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Resolve-ApplyProgressRowIndex` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Add-ApplyProgressVisibleRow`.
+- Source: [MiraQueue.ps1:810](../../MiraQueue.ps1#L810)
+- Parameters: `Table`, `Index`, `ShowIfHidden`.
+- Direct internal calls: `Add-ApplyProgressVisibleRow`.
 
 ### Update-ApplyProgressRow
 
-- **Lines:** 754-812
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the u pd at e a pp ly pr og re ss ro w helper behavior used by nearby workflows.
+Updates a transfer row's status, byte counters and rendered progress.
 
-`Update-ApplyProgressRow` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Table`, `Index`, `Status`, `CopiedBytes`, `TotalBytes`, `StartedAt`, `Complete`, `ForceRender`, `ShowIfHidden`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Update-ApplyProgressRow` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Get-ApplyStatusColor`, `Format-ApplyProgressRow`, `Get-ApplyProgressSummary`, `Get-ApplyProgressVisibleStart`, `Redraw-ApplyProgressViewport`, `Resolve-ApplyProgressRowIndex`.
+- Source: [MiraQueue.ps1:827](../../MiraQueue.ps1#L827)
+- Parameters: `Table`, `Index`, `Status`, `CopiedBytes`, `TotalBytes`, `StartedAt`, `Complete`, `ForceRender`, `ShowIfHidden`.
+- Direct internal calls: `Format-ApplyProgressRow`, `Get-ApplyProgressSummary`, `Get-ApplyProgressVisibleStart`, `Get-ApplyStatusColor`, `Redraw-ApplyProgressViewport`, `Resolve-ApplyProgressRowIndex`.
 
 ### Wait-Back
 
-- **Lines:** 813-820
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the w ai t b ac k helper behavior used by nearby workflows.
+Waits for the user to return from a console screen.
 
-`Wait-Back` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Prompt`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Wait-Back` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Write-Color`.
+- Source: [MiraQueue.ps1:886](../../MiraQueue.ps1#L886)
+- Parameters: `Prompt`.
+- Direct internal calls: `Write-Color`.
 
 ### Read-KeyChoice
 
-- **Lines:** 821-832
-- **Area:** Console interface and progress display
-- **Primary role:** Collects r ea d k ey ch oi ce input from the console while preserving Escape/cancel behavior.
+Collects r ea d k ey ch oi ce input from the console while preserving Escape/cancel behavior.
 
-`Read-KeyChoice` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Prompt`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Read-KeyChoice` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Write-Color`.
+- Source: [MiraQueue.ps1:894](../../MiraQueue.ps1#L894)
+- Parameters: `Prompt`.
+- Direct internal calls: `Write-Color`.
 
 ### Read-LineOrEsc
 
-- **Lines:** 833-854
-- **Area:** Console interface and progress display
-- **Primary role:** Collects r ea d l in eo re sc input from the console while preserving Escape/cancel behavior.
+Collects r ea d l in eo re sc input from the console while preserving Escape/cancel behavior.
 
-`Read-LineOrEsc` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Prompt`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Read-LineOrEsc` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Write-Color`.
+- Source: [MiraQueue.ps1:906](../../MiraQueue.ps1#L906)
+- Parameters: `Prompt`.
+- Direct internal calls: `Write-Color`.
 
 ### Read-NumberOrEsc
 
-- **Lines:** 855-865
-- **Area:** Console interface and progress display
-- **Primary role:** Collects r ea d n um be ro re sc input from the console while preserving Escape/cancel behavior.
+Collects r ea d n um be ro re sc input from the console while preserving Escape/cancel behavior.
 
-`Read-NumberOrEsc` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Prompt`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Read-NumberOrEsc` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Read-LineOrEsc`.
+- Source: [MiraQueue.ps1:928](../../MiraQueue.ps1#L928)
+- Parameters: `Prompt`.
+- Direct internal calls: `Read-LineOrEsc`, `Write-Color`.
 
 ### Read-EnterOrEsc
 
-- **Lines:** 866-876
-- **Area:** Console interface and progress display
-- **Primary role:** Collects r ea d e nt er or es c input from the console while preserving Escape/cancel behavior.
+Collects r ea d e nt er or es c input from the console while preserving Escape/cancel behavior.
 
-`Read-EnterOrEsc` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Prompt`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Read-EnterOrEsc` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Write-Color`.
+- Source: [MiraQueue.ps1:939](../../MiraQueue.ps1#L939)
+- Parameters: `Prompt`.
+- Direct internal calls: `Write-Color`.
 
 ### Normalize-PathText
 
-- **Lines:** 877-884
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Provides the n or ma li ze p at ht ex t helper behavior used by nearby workflows.
+Trims path quotes and whitespace, normalizes separators and removes non-root trailing separators.
 
-`Normalize-PathText` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Path`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Normalize-PathText` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:950](../../MiraQueue.ps1#L950)
+- Parameters: `Path`.
+- Direct internal calls: none.
 
 ### Format-ErrorSummary
 
-- **Lines:** 885-899
-- **Area:** Shared core helper
-- **Primary role:** Calculates or formats f or ma t e rr or su mm ar y data for callers that need a stable value instead of duplicating the logic.
+Maps an error message to a short display category.
 
-`Format-ErrorSummary` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Message`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Format-ErrorSummary` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:958](../../MiraQueue.ps1#L958)
+- Parameters: `Message`.
+- Direct internal calls: none.
 
 ### Get-AutoPairName
 
-- **Lines:** 900-919
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Calculates or formats g et a ut op ai rn am e data for callers that need a stable value instead of duplicating the logic.
+Derives a pair name from a source or destination path.
 
-`Get-AutoPairName` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Source`, `Dest`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-AutoPairName` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Normalize-PathText`.
+- Source: [MiraQueue.ps1:973](../../MiraQueue.ps1#L973)
+- Parameters: `Source`, `Dest`.
+- Direct internal calls: `Normalize-PathText`.
 
 ### Resolve-DestinationPath
 
-- **Lines:** 920-938
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Provides the r es ol ve d es ti na ti on pa th helper behavior used by nearby workflows.
+Substitutes configured drive-map prefixes in destination paths.
 
-`Resolve-DestinationPath` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Path`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Resolve-DestinationPath` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:993](../../MiraQueue.ps1#L993)
+- Parameters: `Path`.
+- Direct internal calls: none.
 
 ### Get-RelativePath
 
-- **Lines:** 939-951
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Calculates or formats g et r el at iv ep at h data for callers that need a stable value instead of duplicating the logic.
+Returns a relative child path only after verifying a strict root boundary, including the separator.
 
-`Get-RelativePath` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Root`, `Path`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-RelativePath` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:1012](../../MiraQueue.ps1#L1012)
+- Parameters: `Root`, `Path`.
+- Direct internal calls: `Test-PathInsideRoot`.
 
 ### Join-PathSafe
 
-- **Lines:** 952-957
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Provides the j oi n p at hs af e helper behavior used by nearby workflows.
+Validates a relative path and verifies that its canonical result remains strictly inside the supplied root.
 
-`Join-PathSafe` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
+- Source: [MiraQueue.ps1:1018](../../MiraQueue.ps1#L1018)
+- Parameters: `Base`, `Rel`.
+- Direct internal calls: `Normalize-QueueRelPath`, `Test-PathInsideRoot`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Base`, `Rel`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
+### Assert-NoReparsePath
 
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
+Rejects reparse points or inspection errors on a path and its ancestors; missing future child paths are allowed.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Join-PathSafe` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:1027](../../MiraQueue.ps1#L1027)
+- Parameters: `Path`.
+- Direct internal calls: `Get-ExactPathProbe`.
 
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+### Assert-PairLayout
+
+Requires absolute nonoverlapping roots and prevents destinations from overlapping configured sources.
+
+- Source: [MiraQueue.ps1:1042](../../MiraQueue.ps1#L1042)
+- Parameters: `Pair`.
+- Direct internal calls: `Assert-NoReparsePath`, `Expand-TextPath`, `Get-Pairs`, `Resolve-DestinationPath`, `Test-PathInsideRoot`.
+
+### Get-SafeEntryPaths
+
+Recomputes contained current paths, rejects reparse points and refuses queued work redirected by config edits.
+
+- Source: [MiraQueue.ps1:1059](../../MiraQueue.ps1#L1059)
+- Parameters: `Pair`, `Entry`.
+- Direct internal calls: `Assert-NoReparsePath`, `Assert-PairLayout`, `Expand-TextPath`, `Join-PathSafe`, `Normalize-QueueRelPath`, `Resolve-DestinationPath`.
+
+### Get-SafeTreeItems
+
+Enumerates with terminating errors, prunes excluded subtrees and rejects encountered reparse points.
+
+- Source: [MiraQueue.ps1:1074](../../MiraQueue.ps1#L1074)
+- Parameters: `Root`, `Pair`, `EquivalentRoot`.
+- Direct internal calls: `Assert-NoReparsePath`, `Get-RelativePath`, `Join-PathSafe`, `Test-Excluded`.
+
+### Remove-OwnedPath
+
+Checks containment and reparse boundaries, clears ReadOnly when necessary, deletes with .NET and verifies absence.
+
+- Source: [MiraQueue.ps1:1091](../../MiraQueue.ps1#L1091)
+- Parameters: `Root`, `Path`, `Recurse`.
+- Direct internal calls: `Assert-NoReparsePath`, `Get-ExactPathProbe`, `Get-SafeTreeItems`, `Test-PathInsideRoot`.
+
+### Remove-VerifiedDestination
+
+Checks exclusions throughout a directory, then reconfirms roots and source absence before deleting the target.
+
+- Source: [MiraQueue.ps1:1115](../../MiraQueue.ps1#L1115)
+- Parameters: `Pair`, `RelPath`.
+- Direct internal calls: `Assert-NoReparsePath`, `Assert-PairLayout`, `Get-ExactPathProbe`, `Get-RelativePath`, `Get-SafeTreeItems`, `Join-PathSafe`, `Remove-OwnedPath`, `Resolve-DestinationPath`, `Test-Excluded`.
 
 ### Test-NameMatchesAny
 
-- **Lines:** 958-966
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Evaluates the t es t n am em at ch es an y condition and lets the caller choose a safe branch based on a clear result.
+Checks a name against a collection of exclusion patterns.
 
-`Test-NameMatchesAny` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
+- Source: [MiraQueue.ps1:1139](../../MiraQueue.ps1#L1139)
+- Parameters: `Text`, `Patterns`.
+- Direct internal calls: none.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Text`, `Patterns`. The caller expects a boolean or compact status object that can be used immediately in a branch.
+### Test-RelativeDirExcluded
 
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
+Matches a normalized relative directory or descendant against a relative exclusion pattern.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-NameMatchesAny` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:1148](../../MiraQueue.ps1#L1148)
+- Parameters: `RelPath`, `Pattern`.
+- Direct internal calls: none.
 
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+### Convert-PairExcludeDirForRobocopy
+
+Resolves relative per-pair directory exclusions against the original source root for directory transport.
+
+- Source: [MiraQueue.ps1:1157](../../MiraQueue.ps1#L1157)
+- Parameters: `Pair`, `Pattern`.
+- Direct internal calls: `Join-PathSafe`.
 
 ### Test-Excluded
 
-- **Lines:** 967-990
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Evaluates the t es t e xc lu de d condition and lets the caller choose a safe branch based on a clear result.
+Checks global and per-pair exclusions for a relative file or directory path.
 
-`Test-Excluded` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Pair`, `FullPath`, `IsDirectory`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-Excluded` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Get-Array`, `Get-MapArray`, `Get-RelativePath`, `Test-NameMatchesAny`.
+- Source: [MiraQueue.ps1:1165](../../MiraQueue.ps1#L1165)
+- Parameters: `Pair`, `FullPath`, `IsDirectory`.
+- Direct internal calls: `Get-Array`, `Get-MapArray`, `Get-RelativePath`, `Test-NameMatchesAny`, `Test-RelativeDirExcluded`.
 
 ### Test-DestRootAvailable
 
-- **Lines:** 991-1002
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Evaluates the t es t d es tr oo ta va il ab le condition and lets the caller choose a safe branch based on a clear result.
+Checks destination root availability before operations that depend on it.
 
-`Test-DestRootAvailable` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
+- Source: [MiraQueue.ps1:1212](../../MiraQueue.ps1#L1212)
+- Parameters: `DestPath`.
+- Direct internal calls: `Resolve-DestinationPath`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `DestPath`. The caller expects a boolean or compact status object that can be used immediately in a branch.
+### Initialize-PhysicalPathApi
 
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
+Loads the small Windows native path-resolution interop type lazily.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-DestRootAvailable` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:1224](../../MiraQueue.ps1#L1224)
+- Parameters: none.
+- Direct internal calls: none.
 
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Resolve-DestinationPath`.
+### Get-PhysicalDestinationKey
+
+Resolves a destination ancestor for conflict serialization; uncertainty falls back to a shared serialization group.
+
+- Source: [MiraQueue.ps1:1262](../../MiraQueue.ps1#L1262)
+- Parameters: `Destination`.
+- Direct internal calls: `Initialize-PhysicalPathApi`, `Write-Log`.
+
+### Test-TcpPortQuick
+
+Performs a bounded TCP readiness hint and closes the client; a positive hint is not deletion authorization.
+
+- Source: [MiraQueue.ps1:1288](../../MiraQueue.ps1#L1288)
+- Parameters: `Server`, `Port`, `TimeoutMs`.
+- Direct internal calls: none.
+
+### Test-DestRootAvailableFast
+
+Caches a short-lived root readiness hint for status displays.
+
+- Source: [MiraQueue.ps1:1311](../../MiraQueue.ps1#L1311)
+- Parameters: `DestPath`.
+- Direct internal calls: `Resolve-DestinationPath`, `Test-TcpPortQuick`.
+
+### Enter-ApplyLock
+
+Acquires and holds an exclusive file handle for Apply, Full Mirror or uninstall; never steals a lock by age.
+
+- Source: [MiraQueue.ps1:1345](../../MiraQueue.ps1#L1345)
+- Parameters: `Operation`, `Quiet`.
+- Direct internal calls: `Wait-Back`, `Write-Color`, `Write-Log`.
+
+### Exit-ApplyLock
+
+Disposes this operation's lock handle; the reusable unlocked lock file remains until uninstall.
+
+- Source: [MiraQueue.ps1:1365](../../MiraQueue.ps1#L1365)
+- Parameters: none.
+- Direct internal calls: none.
 
 ### Find-PairByName
 
-- **Lines:** 1003-1010
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Provides the f in d p ai rb yn am e helper behavior used by nearby workflows.
+Finds a configured pair by its name.
 
-`Find-PairByName` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Name`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Find-PairByName` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`.
+- Source: [MiraQueue.ps1:1370](../../MiraQueue.ps1#L1370)
+- Parameters: `Name`.
+- Direct internal calls: `Get-Pairs`.
 
 ### New-QueueEntry
 
-- **Lines:** 1011-1041
-- **Area:** Pending queue model
-- **Primary role:** Provides the n ew q ue ue en tr y helper behavior used by nearby workflows.
+Creates a schema-2 source event with a stable random ID and explicit operation/event/baseline fields.
 
-`New-QueueEntry` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
+- Source: [MiraQueue.ps1:1378](../../MiraQueue.ps1#L1378)
+- Parameters: `Pair`, `FullPath`, `Action`, `KnownIsDirectory`, `EventKind`, `BaselineState`.
+- Direct internal calls: `Get-RelativePath`, `Join-PathSafe`, `Resolve-DestinationPath`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Pair`, `FullPath`, `Action`, `KnownIsDirectory`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
+### ConvertTo-UtcTimestamp
 
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
+Normalizes string or DateTime JSON values to invariant UTC without losing subsecond precision; shared by queue writes and cutoff comparisons.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `New-QueueEntry` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:1423](../../MiraQueue.ps1#L1423)
+- Parameters: `Value`.
+- Direct internal calls: none.
 
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Resolve-DestinationPath`, `Get-RelativePath`, `Join-PathSafe`.
+### ConvertTo-QueueV2Entry
 
-### Append-QueueEntry
+Validates and normalizes V1 or V2 records; preserves IDs and rejects invalid or unsupported schemas.
 
-- **Lines:** 1042-1053
-- **Area:** Pending queue model
-- **Primary role:** Provides the a pp en d q ue ue en tr y helper behavior used by nearby workflows.
+- Source: [MiraQueue.ps1:1434](../../MiraQueue.ps1#L1434)
+- Parameters: `Entry`.
+- Direct internal calls: `ConvertTo-UtcTimestamp`, `Normalize-QueueRelPath`.
 
-`Append-QueueEntry` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
+### Add-PendingMetric
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
+Accumulates optional elapsed times and counts globally and by pair/operation.
 
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
+- Source: [MiraQueue.ps1:1467](../../MiraQueue.ps1#L1467)
+- Parameters: `Name`, `Started`, `Count`, `Pair`, `Operation`.
+- Direct internal calls: none.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Append-QueueEntry` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+### Invoke-PendingPathProbe
 
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Write-Log`.
+Wraps an exact path probe with optional performance attribution.
+
+- Source: [MiraQueue.ps1:1488](../../MiraQueue.ps1#L1488)
+- Parameters: `Path`, `Kind`, `Pair`, `Operation`.
+- Direct internal calls: `Add-PendingMetric`, `Get-ExactPathProbe`.
+
+### Enter-QueueMutex
+
+Acquires the queue-path-specific mutex with timeout and abandoned-owner handling; returns null on acquisition failure.
+
+- Source: [MiraQueue.ps1:1495](../../MiraQueue.ps1#L1495)
+- Parameters: `TimeoutMs`.
+- Direct internal calls: `Add-PendingMetric`.
+
+### Exit-QueueMutex
+
+Releases/disposes the acquired mutex and records optional hold time.
+
+- Source: [MiraQueue.ps1:1517](../../MiraQueue.ps1#L1517)
+- Parameters: `Mutex`.
+- Direct internal calls: `Add-PendingMetric`.
+
+### Read-QueueEntriesUnlocked
+
+Reads and validates every nonblank NDJSON record; throws on read/parse/schema failure instead of dropping work.
+
+- Source: [MiraQueue.ps1:1527](../../MiraQueue.ps1#L1527)
+- Parameters: none.
+- Direct internal calls: `Add-PendingMetric`, `ConvertTo-QueueV2Entry`.
 
 ### Read-QueueEntries
 
-- **Lines:** 1054-1065
-- **Area:** Pending queue model
-- **Primary role:** Collects r ea d q ue ue en tr ie s input from the console while preserving Escape/cancel behavior.
+Acquires the queue mutex and returns validated records; timeout is an error, not an empty queue.
 
-`Read-QueueEntries` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
+- Source: [MiraQueue.ps1:1545](../../MiraQueue.ps1#L1545)
+- Parameters: none.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Read-QueueEntriesUnlocked`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
+### Get-QueuePathNode
 
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
+Finds or creates a per-pair node in the transient hierarchical path index.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Read-QueueEntries` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:1551](../../MiraQueue.ps1#L1551)
+- Parameters: `PathIndex`, `Entry`, `Create`.
+- Direct internal calls: `Normalize-QueueRelPath`.
 
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Write-Log`.
+### Remove-QueueDescendants
+
+Removes relevant descendants through the index, or a small dictionary fallback, optionally only known-new work.
+
+- Source: [MiraQueue.ps1:1569](../../MiraQueue.ps1#L1569)
+- Parameters: `Dictionary`, `Parent`, `OnlyNew`, `PathIndex`.
+- Direct internal calls: `Get-QueuePathNode`, `Normalize-QueueRelPath`.
+
+### Merge-QueueEntryState
+
+Reduces one normalized event into effective state while preserving baseline and parent/child semantics.
+
+- Source: [MiraQueue.ps1:1601](../../MiraQueue.ps1#L1601)
+- Parameters: `Dictionary`, `Incoming`, `PathIndex`.
+- Direct internal calls: `ConvertTo-QueueV2Entry`, `Get-QueueEntryKey`, `Get-QueuePathNode`, `Remove-QueueDescendants`.
+
+### Get-QueueDictionary
+
+Builds case-insensitive effective queue state with a shared path index for the batch.
+
+- Source: [MiraQueue.ps1:1640](../../MiraQueue.ps1#L1640)
+- Parameters: `Entries`, `PathIndex`.
+- Direct internal calls: `Add-PendingMetric`, `Merge-QueueEntryState`.
 
 ### Get-LatestQueueEntries
 
-- **Lines:** 1066-1076
-- **Area:** Pending queue model
-- **Primary role:** Calculates or formats g et l at es tq ue ue en tr ie s data for callers that need a stable value instead of duplicating the logic.
+Returns indexed effective queue entries sorted for stable storage/display.
 
-`Get-LatestQueueEntries` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entries`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-LatestQueueEntries` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:1651](../../MiraQueue.ps1#L1651)
+- Parameters: `Entries`.
+- Direct internal calls: `Add-PendingMetric`, `Get-QueueDictionary`.
 
 ### Remove-OrphanedUpserts
 
-- **Lines:** 1077-1098
-- **Area:** Shared core helper
-- **Primary role:** Mutates the r em ov e o rp ha ne du ps er ts state in one named place so the rest of the script does not duplicate update rules.
+Filters upserts covered by a delete for the same path or an ancestor in the same pair.
 
-`Remove-OrphanedUpserts` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
+- Source: [MiraQueue.ps1:1659](../../MiraQueue.ps1#L1659)
+- Parameters: `Entries`.
+- Direct internal calls: `Add-PendingMetric`, `Get-QueueEntryKey`, `Normalize-QueueRelPath`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entries`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
+### Write-QueueMetaUnlocked
 
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
+Atomically writes schema-2 counts and queue length/write-time fingerprint; caller holds the queue mutex.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Remove-OrphanedUpserts` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:1683](../../MiraQueue.ps1#L1683)
+- Parameters: `Entries`.
+- Direct internal calls: `Remove-OwnedPath`.
 
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+### Get-QueueFileFingerprint
+
+Returns queue length and last-write ticks for in-process snapshot invalidation.
+
+- Source: [MiraQueue.ps1:1708](../../MiraQueue.ps1#L1708)
+- Parameters: none.
+- Direct internal calls: none.
+
+### Get-PendingPairIndex
+
+Indexes configured pairs and resolved roots for a scan, avoiding repeated pair/drive-map searches.
+
+- Source: [MiraQueue.ps1:1723](../../MiraQueue.ps1#L1723)
+- Parameters: none.
+- Direct internal calls: `Get-Pairs`, `Resolve-DestinationPath`.
+
+### Get-PendingDirectoryNames
+
+Enumerates requested names nonrecursively with a cap and early exit; partial absence never proves a missing item.
+
+- Source: [MiraQueue.ps1:1737](../../MiraQueue.ps1#L1737)
+- Parameters: `Directory`, `Limit`, `Wanted`.
+- Direct internal calls: `Add-PendingMetric`, `Format-ErrorSummary`.
+
+### Add-PendingDiscoveryAttribution
+
+Allocates shared directory-enumeration time across logical requests without double-counting physical totals.
+
+- Source: [MiraQueue.ps1:1768](../../MiraQueue.ps1#L1768)
+- Parameters: `Requests`, `ElapsedMs`.
+- Direct internal calls: none.
+
+### Resolve-PendingDestinationObservations
+
+Uses sparse exact probes or bounded dense enumeration; negative results require root confirmation.
+
+- Source: [MiraQueue.ps1:1783](../../MiraQueue.ps1#L1783)
+- Parameters: `Requests`.
+- Direct internal calls: `Add-PendingDiscoveryAttribution`, `Add-PendingMetric`, `Get-PendingDirectoryNames`, `Invoke-PendingPathProbe`.
+
+### Get-PendingDestinationState
+
+Probes distinct roots and reports pair availability and observed root-state transitions.
+
+- Source: [MiraQueue.ps1:1865](../../MiraQueue.ps1#L1865)
+- Parameters: `PreviousRootOnline`, `PairIndex`.
+- Direct internal calls: `Get-PendingPairIndex`, `Invoke-PendingPathProbe`.
+
+### Save-PendingClassifications
+
+Commits changed upsert baselines only for matching IDs, capturing final entries/fingerprint under one lock.
+
+- Source: [MiraQueue.ps1:1893](../../MiraQueue.ps1#L1893)
+- Parameters: `Classifications`, `PassThru`.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Get-QueueDictionary`, `Get-QueueFileFingerprint`, `Read-QueueEntriesUnlocked`, `Write-Log`, `Write-QueueEntriesUnlocked`.
+
+### Get-ExactPathProbe
+
+Distinguishes Exists, Missing and Error using .NET attribute reads rather than treating all failures as absence.
+
+- Source: [MiraQueue.ps1:1931](../../MiraQueue.ps1#L1931)
+- Parameters: `Path`.
+- Direct internal calls: `Format-ErrorSummary`.
+
+### Sync-PendingDeleteEntries
+
+Reconciles restored sources and obsolete deletes; ReadOnly produces decisions in memory without queue writes.
+
+- Source: [MiraQueue.ps1:1956](../../MiraQueue.ps1#L1956)
+- Parameters: `Entries`, `DestinationState`, `ReadOnly`.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Find-PairByName`, `Get-QueueDictionary`, `Get-QueueEntryKey`, `Get-SafeEntryPaths`, `Get-SafeTreeItems`, `Invoke-PendingPathProbe`, `Merge-QueueEntryState`, `New-QueueEntry`, `Read-QueueEntriesUnlocked`, `Write-Log`, `Write-QueueEntriesUnlocked`.
+
+### Queue-ReconciledDirectorySnapshot
+
+Rechecks a restored directory's ID/action before expanding its children.
+
+- Source: [MiraQueue.ps1:2074](../../MiraQueue.ps1#L2074)
+- Parameters: `Entry`.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Get-ExactPathProbe`, `Get-QueueDictionary`, `Get-QueueEntryKey`, `Queue-DirectorySnapshot`, `Read-QueueEntriesUnlocked`, `Write-Log`.
+
+### Sync-PendingSessionSnapshot
+
+Reuses stable observations, reconciles current work and reports counts; ReadOnly omits disk/log commits.
+
+- Source: [MiraQueue.ps1:2097](../../MiraQueue.ps1#L2097)
+- Parameters: `RefreshDestinations`, `ShowProgress`, `ReadOnly`.
+- Direct internal calls: `Add-PendingMetric`, `Get-LatestQueueEntries`, `Get-PendingDestinationState`, `Get-PendingPairIndex`, `Get-QueueEntryKey`, `Get-QueueFileFingerprint`, `Queue-ReconciledDirectorySnapshot`, `Read-QueueEntries`, `Remove-OrphanedUpserts`, `Resolve-PendingDestinationObservations`, `Save-PendingClassifications`, `Sync-PendingDeleteEntries`, `Write-Log`.
+
+### Write-QueueEntriesUnlocked
+
+Atomically writes normalized NDJSON, then updates rebuildable metadata; never deletes the original as a fallback.
+
+- Source: [MiraQueue.ps1:2240](../../MiraQueue.ps1#L2240)
+- Parameters: `Entries`, `PassThru`.
+- Direct internal calls: `Add-PendingMetric`, `Get-LatestQueueEntries`, `Remove-OwnedPath`, `Write-Log`, `Write-QueueMetaUnlocked`.
 
 ### Write-QueueEntries
 
-- **Lines:** 1099-1113
-- **Area:** Pending queue model
-- **Primary role:** Provides the w ri te q ue ue en tr ie s helper behavior used by nearby workflows.
+Serializes an explicit whole-queue replacement under the queue mutex and reports success.
 
-`Write-QueueEntries` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
+- Source: [MiraQueue.ps1:2268](../../MiraQueue.ps1#L2268)
+- Parameters: `Entries`.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Write-Log`, `Write-QueueEntriesUnlocked`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entries`. The main output is console presentation. Any return value is secondary to navigation or display.
+### Test-QueueMetaFresh
 
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
+Checks metadata schema plus queue length/write ticks; metadata is a cache rather than pending-work authority.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Write-QueueEntries` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:2275](../../MiraQueue.ps1#L2275)
+- Parameters: none.
+- Direct internal calls: none.
 
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Write-Log`.
+### Initialize-QueueStorage
+
+Migrates/normalizes valid records under mutex when metadata is stale; invalid queues remain untouched.
+
+- Source: [MiraQueue.ps1:2284](../../MiraQueue.ps1#L2284)
+- Parameters: none.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Read-QueueEntriesUnlocked`, `Test-QueueMetaFresh`, `Write-Log`, `Write-QueueEntriesUnlocked`.
+
+### Merge-QueueEntriesToDisk
+
+Reads, reduces and writes a batch under one mutex so concurrent writer commits are not lost.
+
+- Source: [MiraQueue.ps1:2299](../../MiraQueue.ps1#L2299)
+- Parameters: `Entries`.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Get-QueueDictionary`, `Merge-QueueEntryState`, `Read-QueueEntriesUnlocked`, `Write-Log`, `Write-QueueEntriesUnlocked`.
+
+### Remove-AppliedQueueEntries
+
+Removes only successful keys whose current IDs equal the attempted IDs; preserves newer watcher events.
+
+- Source: [MiraQueue.ps1:2312](../../MiraQueue.ps1#L2312)
+- Parameters: `AttemptedEntries`, `SuccessfulKeys`.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Get-QueueDictionary`, `Get-QueueEntryKey`, `Read-QueueEntriesUnlocked`, `Write-Log`, `Write-QueueEntriesUnlocked`.
 
 ### Clear-PendingQueue
 
-- **Lines:** 1114-1128
-- **Area:** Pending queue model
-- **Primary role:** Mutates the c le ar p en di ng qu eu e state in one named place so the rest of the script does not duplicate update rules.
+Shows queue counts and requests an explicit clear while preserving source and destination files.
 
-`Clear-PendingQueue` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Clear-PendingQueue` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Wait-Back`, `Read-EnterOrEsc`, `Read-QueueEntries`, `Get-LatestQueueEntries`, `Request-ClearPendingQueue`.
+- Source: [MiraQueue.ps1:2330](../../MiraQueue.ps1#L2330)
+- Parameters: none.
+- Direct internal calls: `Get-LatestQueueEntries`, `Read-EnterOrEsc`, `Read-QueueEntries`, `Request-ClearPendingQueue`, `Show-Header`, `Wait-Back`, `Write-Color`.
 
 ### Request-ClearPendingQueue
 
-- **Lines:** 1129-1146
-- **Area:** Pending queue model
-- **Primary role:** Provides the r eq ue st c le ar pe nd in gq ue ue helper behavior used by nearby workflows.
+Explicitly discards work up to a timestamp cutoff and writes a watcher acknowledgment request.
 
-`Request-ClearPendingQueue` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Request-ClearPendingQueue` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Read-QueueEntries`, `Write-QueueEntries`.
+- Source: [MiraQueue.ps1:2345](../../MiraQueue.ps1#L2345)
+- Parameters: none.
+- Direct internal calls: `ConvertTo-UtcTimestamp`, `Enter-QueueMutex`, `Exit-QueueMutex`, `Read-QueueEntriesUnlocked`, `Write-AtomicText`, `Write-QueueEntriesUnlocked`.
 
 ### Add-PendingEvent
 
-- **Lines:** 1147-1153
-- **Area:** Pending queue model
-- **Primary role:** Mutates the a dd p en di ng ev en t state in one named place so the rest of the script does not duplicate update rules.
+Merges an event into the in-memory debounce buffer and schedules its commit time.
 
-`Add-PendingEvent` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Add-PendingEvent` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Get-QueueEntryKey`.
+- Source: [MiraQueue.ps1:2361](../../MiraQueue.ps1#L2361)
+- Parameters: `Entry`.
+- Direct internal calls: `ConvertTo-QueueV2Entry`, `Get-QueueEntryKey`, `Merge-QueueEntryState`.
 
 ### Normalize-QueueRelPath
 
-- **Lines:** 1154-1158
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Provides the n or ma li ze q ue ue re lp at h helper behavior used by nearby workflows.
+Normalizes separators and rejects traversal, rooted paths, alternate streams and ambiguous Windows path segments.
 
-`Normalize-QueueRelPath` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `RelPath`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Normalize-QueueRelPath` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:2381](../../MiraQueue.ps1#L2381)
+- Parameters: `RelPath`.
+- Direct internal calls: none.
 
 ### Get-QueueEntryKey
 
-- **Lines:** 1159-1163
-- **Area:** Pending queue model
-- **Primary role:** Calculates or formats g et q ue ue en tr yk ey data for callers that need a stable value instead of duplicating the logic.
+Combines pair name and validated relative path into a case-insensitive queue identity.
 
-`Get-QueueEntryKey` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-QueueEntryKey` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Normalize-QueueRelPath`.
+- Source: [MiraQueue.ps1:2391](../../MiraQueue.ps1#L2391)
+- Parameters: `Entry`.
+- Direct internal calls: `Normalize-QueueRelPath`.
 
 ### Test-QueueEntryChildOf
 
-- **Lines:** 1164-1174
-- **Area:** Pending queue model
-- **Primary role:** Evaluates the t es t q ue ue en tr yc hi ld of condition and lets the caller choose a safe branch based on a clear result.
+Checks whether an entry is a strict descendant of another entry in the same pair.
 
-`Test-QueueEntryChildOf` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`, `Parent`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-QueueEntryChildOf` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Normalize-QueueRelPath`.
-
-### Test-QueueEntryCoveredByAppliedDelete
-
-- **Lines:** 1175-1182
-- **Area:** Pending queue model
-- **Primary role:** Evaluates the t es t q ue ue en tr yc ov er ed by ap pl ie dd el et e condition and lets the caller choose a safe branch based on a clear result.
-
-`Test-QueueEntryCoveredByAppliedDelete` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`, `AppliedDeletes`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-QueueEntryCoveredByAppliedDelete` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Test-QueueEntryChildOf`.
+- Source: [MiraQueue.ps1:2396](../../MiraQueue.ps1#L2396)
+- Parameters: `Entry`, `Parent`.
+- Direct internal calls: `Normalize-QueueRelPath`.
 
 ### Flush-PendingEvents
 
-- **Lines:** 1183-1193
-- **Area:** Pending queue model
-- **Primary role:** Provides the f lu sh p en di ng ev en ts helper behavior used by nearby workflows.
+Commits due buffered events and removes them from memory only after a successful queue write.
 
-`Flush-PendingEvents` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Flush-PendingEvents` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Append-QueueEntry`.
+- Source: [MiraQueue.ps1:2409](../../MiraQueue.ps1#L2409)
+- Parameters: none.
+- Direct internal calls: `Merge-QueueEntriesToDisk`, `Write-Log`.
 
 ### Process-ClearQueueRequest
 
-- **Lines:** 1194-1205
-- **Area:** Pending queue model
-- **Primary role:** Provides the p ro ce ss c le ar qu eu er eq ue st helper behavior used by nearby workflows.
+Clears buffered/disk work up to the saved cutoff while preserving newer events, then removes the request.
 
-`Process-ClearQueueRequest` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
+- Source: [MiraQueue.ps1:2426](../../MiraQueue.ps1#L2426)
+- Parameters: none.
+- Direct internal calls: `ConvertTo-UtcTimestamp`, `Enter-QueueMutex`, `Exit-QueueMutex`, `Read-QueueEntriesUnlocked`, `Remove-OwnedPath`, `Write-QueueEntriesUnlocked`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
+### Merge-ReconciledDirectorySnapshotBatch
 
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
+Commits child entries only if the restored directory's parent ID/action still matches.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Process-ClearQueueRequest` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Write-Log`, `Write-QueueEntries`.
+- Source: [MiraQueue.ps1:2442](../../MiraQueue.ps1#L2442)
+- Parameters: `RootEntry`, `ExpectedRootId`, `Entries`.
+- Direct internal calls: `Enter-QueueMutex`, `Exit-QueueMutex`, `Get-QueueDictionary`, `Get-QueueEntryKey`, `Merge-QueueEntryState`, `Read-QueueEntriesUnlocked`, `Write-Log`, `Write-QueueEntriesUnlocked`.
 
 ### Queue-DirectorySnapshot
 
-- **Lines:** 1206-1227
-- **Area:** Pending queue model
-- **Primary role:** Provides the q ue ue d ir ec to ry sn ap sh ot helper behavior used by nearby workflows.
+Queues safe child batches up to the configured limit, retaining the root tree job and logging truncation/errors.
 
-`Queue-DirectorySnapshot` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Queue-DirectorySnapshot` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Write-Log`, `Test-Excluded`, `Find-PairByName`, `New-QueueEntry`, `Append-QueueEntry`.
+- Source: [MiraQueue.ps1:2467](../../MiraQueue.ps1#L2467)
+- Parameters: `Entry`, `SkipRootMerge`, `ExpectedRootId`.
+- Direct internal calls: `Find-PairByName`, `Get-QueueEntryKey`, `Get-SafeTreeItems`, `Merge-QueueEntriesToDisk`, `Merge-ReconciledDirectorySnapshotBatch`, `New-QueueEntry`, `Test-Excluded`, `Write-Log`.
 
 ### Start-Watcher
 
-- **Lines:** 1228-1292
-- **Area:** Watcher lifecycle and file system events
-- **Primary role:** Starts live filesystem monitoring for configured source folders and records events into the pending queue without copying files automatically.
+Registers source-only filesystem events, enforces one watcher per queue identity and flushes/disposes resources on handled stop.
 
-`Start-Watcher` belongs to the **Watcher lifecycle and file system events** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, FileSystemWatcher events, debounce timing, exclusions, and the watcher mutex.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It may participate in long-running watcher state, but the watcher contract remains queue-only: it records work and does not apply file changes. The important failure mode is event bursts or missed nested directory events. Debounce buffering and directory snapshots reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Start-Watcher` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** manual or scheduled watch mode, created/changed/deleted/renamed events, and directory snapshots.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`, `Write-Color`, `Write-Log`, `Show-Header`, `Wait-Back`, `Resolve-DestinationPath`, `Flush-PendingEvents`, `Process-ClearQueueRequest`, `Process-WatcherEvent`.
+- Source: [MiraQueue.ps1:2518](../../MiraQueue.ps1#L2518)
+- Parameters: none.
+- Direct internal calls: `Assert-PairLayout`, `Flush-PendingEvents`, `Get-Pairs`, `Process-ClearQueueRequest`, `Process-WatcherEvent`, `Remove-OwnedPath`, `Resolve-DestinationPath`, `Show-Header`, `Wait-Back`, `Write-Color`, `Write-Log`.
 
 ### Process-WatcherEvent
 
-- **Lines:** 1293-1381
-- **Area:** Watcher lifecycle and file system events
-- **Primary role:** Converts raw FileSystemWatcher events into MiraQueue queue entries while respecting exclusions and special directory handling.
+Converts safe, nonexcluded source events to pending decisions and logs overflow/source errors for Full Mirror recovery.
 
-`Process-WatcherEvent` belongs to the **Watcher lifecycle and file system events** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, FileSystemWatcher events, debounce timing, exclusions, and the watcher mutex.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Evt`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It may participate in long-running watcher state, but the watcher contract remains queue-only: it records work and does not apply file changes. The important failure mode is event bursts or missed nested directory events. Debounce buffering and directory snapshots reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Process-WatcherEvent` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** manual or scheduled watch mode, created/changed/deleted/renamed events, and directory snapshots.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`, `Write-Log`, `Test-Excluded`, `New-QueueEntry`, `Add-PendingEvent`, `Queue-DirectorySnapshot`.
+- Source: [MiraQueue.ps1:2598](../../MiraQueue.ps1#L2598)
+- Parameters: `Evt`.
+- Direct internal calls: `Add-PendingEvent`, `Assert-NoReparsePath`, `Get-Pairs`, `New-QueueEntry`, `Queue-DirectorySnapshot`, `Test-Excluded`, `Test-PathInsideRoot`, `Write-Log`.
 
 ### Test-FileNeedsCopy
 
-- **Lines:** 1382-1395
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Evaluates the t es t f il en ee ds co py condition and lets the caller choose a safe branch based on a clear result.
+Compares source and destination file metadata to determine whether a copy is needed.
 
-`Test-FileNeedsCopy` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Source`, `Dest`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-FileNeedsCopy` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:2691](../../MiraQueue.ps1#L2691)
+- Parameters: `Source`, `Dest`, `SourceItem`.
+- Direct internal calls: none.
 
 ### Copy-FileStreamWithProgress
 
-- **Lines:** 1396-1428
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the c op y f il es tr ea mw it hp ro gr es s helper behavior used by nearby workflows.
+Copies file bytes through streams while reporting transfer progress.
 
-`Copy-FileStreamWithProgress` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Source`, `Destination`, `ProgressCallback`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Copy-FileStreamWithProgress` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:2709](../../MiraQueue.ps1#L2709)
+- Parameters: `Source`, `Destination`, `ProgressCallback`, `SourceItem`.
+- Direct internal calls: none.
 
 ### Copy-FileSafe
 
-- **Lines:** 1429-1460
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Provides the c op y f il es af e helper behavior used by nearby workflows.
+Copies a file with the configured replacement behavior and cleans its temporary resources.
 
-`Copy-FileSafe` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Source`, `Dest`, `ProgressCallback`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Copy-FileSafe` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Copy-FileStreamWithProgress`.
+- Source: [MiraQueue.ps1:2744](../../MiraQueue.ps1#L2744)
+- Parameters: `Source`, `Dest`, `ProgressCallback`, `SourceItem`.
+- Direct internal calls: `Assert-NoReparsePath`, `Copy-FileStreamWithProgress`, `Remove-OwnedPath`.
 
 ### Apply-OneEntry
 
-- **Lines:** 1461-1503
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Executes one pending queue entry, choosing between mkdir, copy, delete, skip, or failed result states.
+Applies one currently validated item; destructive checks use current source/root state and uncertain work is retained.
 
-`Apply-OneEntry` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`, `ProgressCallback`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Apply-OneEntry` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Format-ErrorSummary`, `Resolve-DestinationPath`, `Join-PathSafe`, `Test-DestRootAvailable`, `Find-PairByName`, `Test-FileNeedsCopy`, `Copy-FileSafe`.
+- Source: [MiraQueue.ps1:2802](../../MiraQueue.ps1#L2802)
+- Parameters: `Entry`, `ProgressCallback`, `DestinationOnline`, `PairOverride`, `MissingOnly`, `MirrorDelete`.
+- Direct internal calls: `Copy-FileSafe`, `Find-PairByName`, `Get-ExactPathProbe`, `Get-SafeEntryPaths`, `Remove-VerifiedDestination`, `Resolve-DestinationPath`, `Test-DestRootAvailable`, `Test-Excluded`, `Test-FileNeedsCopy`.
 
 ### Get-ApplyProgressStartingStatus
 
-- **Lines:** 1504-1510
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss st ar ti ng st at us data for callers that need a stable value instead of duplicating the logic.
+Chooses DELETE, MKDIR or COPYING for an operation that is starting.
 
-`Get-ApplyProgressStartingStatus` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressStartingStatus` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:2878](../../MiraQueue.ps1#L2878)
+- Parameters: `Entry`.
+- Direct internal calls: none.
 
 ### Get-ApplyProgressFinalStatus
 
-- **Lines:** 1511-1520
-- **Area:** Console interface and progress display
-- **Primary role:** Calculates or formats g et a pp ly pr og re ss fi na ls ta tu s data for callers that need a stable value instead of duplicating the logic.
+Maps an operation result to its final progress status.
 
-`Get-ApplyProgressFinalStatus` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
+- Source: [MiraQueue.ps1:2885](../../MiraQueue.ps1#L2885)
+- Parameters: `Result`.
+- Direct internal calls: none.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Result`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
+### Get-QueuePathDepth
 
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
+Counts validated relative path segments for parent-before-child creation and child-before-parent deletion ordering.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ApplyProgressFinalStatus` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:2895](../../MiraQueue.ps1#L2895)
+- Parameters: `RelPath`.
+- Direct internal calls: `Normalize-QueueRelPath`.
 
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+### Get-DirectoryTransferTotalBytes
 
-### Test-ApplyResultSelectedForDisplay
+Measures included tree file bytes for grouped-job progress without following directory reparse points.
 
-- **Lines:** 1521-1529
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Evaluates the t es t a pp ly re su lt se le ct ed fo rd is pl ay condition and lets the caller choose a safe branch based on a clear result.
+- Source: [MiraQueue.ps1:2902](../../MiraQueue.ps1#L2902)
+- Parameters: `Entry`.
+- Direct internal calls: `Find-PairByName`, `Format-ErrorSummary`, `Join-PathSafe`, `Test-Excluded`, `Write-Log`.
 
-`Test-ApplyResultSelectedForDisplay` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
+### Get-ApplyExecutionPlan
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`, `Result`, `VisibleEntryKeys`. The caller expects a boolean or compact status object that can be used immediately in a branch.
+Groups directory upserts with their queued descendants and orders deletes, directory jobs and individual files.
 
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
+- Source: [MiraQueue.ps1:2935](../../MiraQueue.ps1#L2935)
+- Parameters: `Entries`.
+- Direct internal calls: `Get-DirectoryTransferTotalBytes`, `Get-QueueEntryKey`, `Get-QueuePathDepth`, `Test-QueueEntryChildOf`.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-ApplyResultSelectedForDisplay` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+### Remove-DirectoryTreeSafe
 
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Get-QueueEntryKey`.
+Allows removal only for a private staging-directory name, using the guarded .NET deletion helper.
+
+- Source: [MiraQueue.ps1:2978](../../MiraQueue.ps1#L2978)
+- Parameters: `Path`.
+- Direct internal calls: `Remove-OwnedPath`.
+
+### Get-DirectoryStagingPath
+
+Constructs a sibling staging directory with a MiraQueue-specific name and random operation ID.
+
+- Source: [MiraQueue.ps1:2984](../../MiraQueue.ps1#L2984)
+- Parameters: `Destination`, `Id`.
+- Direct internal calls: none.
+
+### Build-DirectoryTreeRobocopyArgs
+
+Builds nonpurging directory transport arguments with settings and source-root exclusion patterns.
+
+- Source: [MiraQueue.ps1:2994](../../MiraQueue.ps1#L2994)
+- Parameters: `Pair`, `Source`, `Destination`.
+- Direct internal calls: `Convert-PairExcludeDirForRobocopy`, `Get-Array`, `Get-MapArray`.
+
+### Invoke-StagedDirectoryMerge
+
+Merges private staged content into an existing destination, preserving extras and applying configured metadata preferences.
+
+- Source: [MiraQueue.ps1:3023](../../MiraQueue.ps1#L3023)
+- Parameters: `StageRoot`, `DestinationRoot`.
+- Direct internal calls: `Assert-NoReparsePath`, `Copy-FileSafe`, `Format-ErrorSummary`, `Get-QueuePathDepth`, `Get-RelativePath`, `Join-PathSafe`, `Test-FileNeedsCopy`.
+
+### Invoke-NewDirectoryTreeCopy
+
+Copies a validated directory into private staging with robocopy, publishes/merges on success and cleans staging/processes on failure.
+
+- Source: [MiraQueue.ps1:3065](../../MiraQueue.ps1#L3065)
+- Parameters: `Job`, `DestinationOnline`.
+- Direct internal calls: `Build-DirectoryTreeRobocopyArgs`, `ConvertTo-ProcessArgumentString`, `Find-PairByName`, `Format-ErrorSummary`, `Get-DirectoryStagingPath`, `Get-QueueEntryKey`, `Get-SafeEntryPaths`, `Get-SafeTreeItems`, `Invoke-StagedDirectoryMerge`, `Join-PathSafe`, `Remove-DirectoryTreeSafe`, `Resolve-DestinationPath`, `Test-Excluded`, `Write-Log`.
+
+### Invoke-ParallelFileTransfers
+
+Runs bounded file workers, serializes conflicting targets, reports progress and cleans streams/temp files/runspaces.
+
+- Source: [MiraQueue.ps1:3138](../../MiraQueue.ps1#L3138)
+- Parameters: `Entries`, `PairOnline`, `ProgressTable`, `EntryIndexes`, `PairOverride`, `MissingOnly`.
+- Direct internal calls: `Apply-OneEntry`, `Find-PairByName`, `Format-ErrorSummary`, `Get-ApplyEntryTotalBytes`, `Get-ApplyProgressFinalStatus`, `Get-PhysicalDestinationKey`, `Get-QueueEntryKey`, `Get-SafeEntryPaths`, `Join-PathSafe`, `Resolve-DestinationPath`, `Test-Excluded`, `Update-ApplyProgressRow`, `Write-Log`.
 
 ### Invoke-ApplyPending
 
-- **Lines:** 1530-1619
-- **Area:** Pending queue model
-- **Primary role:** Reads the effective pending queue, applies selected file operations, updates progress, and rewrites the queue to preserve unresolved work.
+Holds the apply lock, refreshes current work, executes the plan and acknowledges matching successes only.
 
-`Invoke-ApplyPending` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Quiet`. The output is workflow-level: visible progress, result objects, changed files, or system state depending on mode.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Invoke-ApplyPending` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Get-ApplyEntryTotalBytes`, `New-ApplyProgressTable`, `Update-ApplyProgressRow`, `Wait-Back`, `Resolve-DestinationPath`, `Join-PathSafe`, `Find-PairByName`, `Read-QueueEntries`.
+- Source: [MiraQueue.ps1:3360](../../MiraQueue.ps1#L3360)
+- Parameters: `Quiet`, `Snapshot`.
+- Direct internal calls: `Apply-OneEntry`, `Enter-ApplyLock`, `Exit-ApplyLock`, `Get-ApplyEntryTotalBytes`, `Get-ApplyExecutionPlan`, `Get-ApplyProgressFinalStatus`, `Get-ApplyProgressStartingStatus`, `Get-QueueEntryKey`, `Invoke-NewDirectoryTreeCopy`, `Invoke-ParallelFileTransfers`, `New-ApplyProgressTable`, `Remove-AppliedQueueEntries`, `Show-ApplyResults`, `Show-Header`, `Sync-PendingSessionSnapshot`, `Update-ApplyProgressRow`, `Wait-Back`, `Write-Color`.
 
 ### Show-PendingPreview
 
-- **Lines:** 1620-1650
-- **Area:** Pending queue model
-- **Primary role:** Presents the s ho w p en di ng pr ev ie w screen or menu and keeps display concerns separate from lower-level operations.
+Displays a read-only paged plan; Enter is a separate explicit apply action, Esc returns.
 
-`Show-PendingPreview` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-PendingPreview` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Wait-Back`, `Read-EnterOrEsc`, `Read-QueueEntries`, `Get-LatestQueueEntries`, `Remove-OrphanedUpserts`, `Invoke-ApplyPending`, `Get-DisplayAction`, `Get-VisiblePendingEntries`.
+- Source: [MiraQueue.ps1:3462](../../MiraQueue.ps1#L3462)
+- Parameters: `Snapshot`.
+- Direct internal calls: `Get-ApplyExecutionPlan`, `Invoke-ApplyPending`, `Show-Header`, `Sync-PendingSessionSnapshot`, `Wait-Back`, `Write-Color`, `Write-PendingTable`.
 
 ### Get-DisplayAction
 
-- **Lines:** 1651-1662
-- **Area:** Shared core helper
-- **Primary role:** Calculates or formats g et d is pl ay ac ti on data for callers that need a stable value instead of duplicating the logic.
+Maps queue action and baseline fields to ADD, UPDATE or DELETE for display.
 
-`Get-DisplayAction` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-DisplayAction` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** Notable internal calls: `Resolve-DestinationPath`, `Join-PathSafe`, `Test-DestRootAvailable`, `Find-PairByName`.
-
-### Test-PendingPreviewEntryVisible
-
-- **Lines:** 1663-1675
-- **Area:** Pending queue model
-- **Primary role:** Evaluates the t es t p en di ng pr ev ie we nt ry vi si bl e condition and lets the caller choose a safe branch based on a clear result.
-
-`Test-PendingPreviewEntryVisible` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-PendingPreviewEntryVisible` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Get-DisplayAction`, `Get-QueueEntryDestinationPath`.
-
-### Get-QueueEntryDestinationPath
-
-- **Lines:** 1676-1687
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Calculates or formats g et q ue ue en tr yd es ti na ti on pa th data for callers that need a stable value instead of duplicating the logic.
-
-`Get-QueueEntryDestinationPath` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entry`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-QueueEntryDestinationPath` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Resolve-DestinationPath`, `Join-PathSafe`, `Find-PairByName`.
-
-### Get-VisiblePendingEntries
-
-- **Lines:** 1688-1692
-- **Area:** Pending queue model
-- **Primary role:** Calculates or formats g et v is ib le pe nd in ge nt ri es data for callers that need a stable value instead of duplicating the logic.
-
-`Get-VisiblePendingEntries` belongs to the **Pending queue model** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on `$script:QueuePath`, queue entry shape, pair names, and the latest-entry collapse rules.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Entries`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is stale or contradictory queue data. Queue helpers collapse repeated actions and keep unresolved work visible.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-VisiblePendingEntries` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** watcher queuing, preview pending, apply pending, and queue clearing.
-- **Dependency notes:** Notable internal calls: `Test-PendingPreviewEntryVisible`.
+- Source: [MiraQueue.ps1:3497](../../MiraQueue.ps1#L3497)
+- Parameters: `Entry`.
+- Direct internal calls: none.
 
 ### Test-ApplyResultVisible
 
-- **Lines:** 1693-1701
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Evaluates the t es t a pp ly re su lt vi si bl e condition and lets the caller choose a safe branch based on a clear result.
+Keeps failures visible while hiding harmless already-existing or already-missing results.
 
-`Test-ApplyResultVisible` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Result`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-ApplyResultVisible` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:3504](../../MiraQueue.ps1#L3504)
+- Parameters: `Result`.
+- Direct internal calls: none.
 
 ### Write-PendingTable
 
-- **Lines:** 1702-1728
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the w ri te p en di ng ta bl e helper behavior used by nearby workflows.
+Renders pending entries with their pair, action, kind and relative path.
 
-`Write-PendingTable` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Items`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Write-PendingTable` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Center-Text`, `Fit-Cell`, `Get-DisplayAction`.
+- Source: [MiraQueue.ps1:3513](../../MiraQueue.ps1#L3513)
+- Parameters: `Items`, `StartIndex`, `TotalCount`.
+- Direct internal calls: `Center-Text`, `Fit-Cell`, `Get-DisplayAction`, `Write-Color`.
 
 ### Show-ApplyResults
 
-- **Lines:** 1729-1812
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Presents the s ho w a pp ly re su lt s screen or menu and keeps display concerns separate from lower-level operations.
+Displays apply counts and individual operation results.
 
-`Show-ApplyResults` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
+- Source: [MiraQueue.ps1:3543](../../MiraQueue.ps1#L3543)
+- Parameters: `Results`, `Title`, `Compact`.
+- Direct internal calls: `Center-Text`, `Fit-Cell`, `Show-Header`, `Test-ApplyResultVisible`, `Wait-Back`, `Write-Color`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Results`, `Title`, `Compact`. The main output is console presentation. Any return value is secondary to navigation or display.
+### New-InternalMirrorScanResult
 
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
+Calculates display counts and detail text from internally discovered changes, independent of localized tool output.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-ApplyResults` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:3653](../../MiraQueue.ps1#L3653)
+- Parameters: `FileChanges`.
+- Direct internal calls: none.
 
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Center-Text`, `Fit-Cell`, `Show-Header`, `Wait-Back`, `Test-ApplyResultVisible`.
+### Get-InternalMirrorScan
 
-### Build-RobocopyArgs
+Indexes safe source/destination trees with exclusions and terminating errors to derive the selected Full Mirror policy plan.
 
-- **Lines:** 1813-1861
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Translates MiraQueue policy and exclusion settings into the exact robocopy argument list.
-
-`Build-RobocopyArgs` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Pair`, `Preview`, `Policy`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Build-RobocopyArgs` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Get-Array`, `Get-MapArray`, `Resolve-DestinationPath`.
-
-### Decode-RobocopyExit
-
-- **Lines:** 1862-1869
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Calculates or formats d ec od e r ob oc op ye xi t data for callers that need a stable value instead of duplicating the logic.
-
-`Decode-RobocopyExit` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Code`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Decode-RobocopyExit` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Get-RobocopySummary
-
-- **Lines:** 1870-1898
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Calculates or formats g et r ob oc op ys um ma ry data for callers that need a stable value instead of duplicating the logic.
-
-`Get-RobocopySummary` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Output`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-RobocopySummary` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Get-RobocopyChangeSummary
-
-- **Lines:** 1899-1924
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Calculates or formats g et r ob oc op yc ha ng es um ma ry data for callers that need a stable value instead of duplicating the logic.
-
-`Get-RobocopyChangeSummary` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Output`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-RobocopyChangeSummary` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Test-RobocopyChangeLine
-
-- **Lines:** 1925-1930
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Evaluates the t es t r ob oc op yc ha ng el in e condition and lets the caller choose a safe branch based on a clear result.
-
-`Test-RobocopyChangeLine` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Line`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-RobocopyChangeLine` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Get-RobocopyChangeText
-
-- **Lines:** 1931-1955
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Calculates or formats g et r ob oc op yc ha ng et ex t data for callers that need a stable value instead of duplicating the logic.
-
-`Get-RobocopyChangeText` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Line`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-RobocopyChangeText` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Convert-RobocopyLineToChange
-
-- **Lines:** 1956-1989
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Calculates or formats c on ve rt r ob oc op yl in et oc ha ng e data for callers that need a stable value instead of duplicating the logic.
-
-`Convert-RobocopyLineToChange` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Line`, `SourceRoot`, `DestRoot`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Convert-RobocopyLineToChange` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Get-RelativePath`, `Join-PathSafe`, `Test-InternalTempCleanupFileName`, `Test-TempCleanupFileEligible`.
-
-### Write-ScanProgress
-
-- **Lines:** 1990-2010
-- **Area:** Console interface and progress display
-- **Primary role:** Provides the w ri te s ca np ro gr es s helper behavior used by nearby workflows.
-
-`Write-ScanProgress` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `FrameIndex`, `PairName`, `Text`, `Color`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Write-ScanProgress` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:3691](../../MiraQueue.ps1#L3691)
+- Parameters: `Pair`, `Policy`, `ProgressCallback`.
+- Direct internal calls: `Assert-PairLayout`, `Get-ExactPathProbe`, `Get-RelativePath`, `Get-SafeTreeItems`, `New-InternalMirrorScanResult`, `Resolve-DestinationPath`, `Test-DestRootAvailable`, `Test-FileNeedsCopy`.
 
 ### ConvertTo-ProcessArgumentString
 
-- **Lines:** 2011-2023
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Calculates or formats c on ve rt to p ro ce ss ar gu me nt st ri ng data for callers that need a stable value instead of duplicating the logic.
+Quotes Windows process arguments, including embedded quotes and trailing backslashes.
 
-`ConvertTo-ProcessArgumentString` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Arguments`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `ConvertTo-ProcessArgumentString` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Clear-ScanProgress
-
-- **Lines:** 2024-2033
-- **Area:** Console interface and progress display
-- **Primary role:** Mutates the c le ar s ca np ro gr es s state in one named place so the rest of the script does not duplicate update rules.
-
-`Clear-ScanProgress` belongs to the **Console interface and progress display** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on console dimensions, color output, and transient display state. It should not change backup data unless it delegates after user input.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is poor readability or accidental selection. The UI helpers keep fixed prompts, Escape handling, and compact tables to reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Clear-ScanProgress` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** interactive menus, previews, progress display, and user cancellation.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Invoke-RobocopyStreaming
-
-- **Lines:** 2034-2120
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Runs the i nv ok e r ob oc op ys tr ea mi ng workflow and coordinates helper calls around a user-visible operation.
-
-`Invoke-RobocopyStreaming` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `RobocopyArgs`, `PairName`. The output is workflow-level: visible progress, result objects, changed files, or system state depending on mode.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Invoke-RobocopyStreaming` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Test-RobocopyChangeLine`, `Get-RobocopyChangeText`, `Write-ScanProgress`, `ConvertTo-ProcessArgumentString`, `Clear-ScanProgress`.
+- Source: [MiraQueue.ps1:3729](../../MiraQueue.ps1#L3729)
+- Parameters: `Arguments`.
+- Direct internal calls: none.
 
 ### Invoke-ApplyFileChanges
 
-- **Lines:** 2121-2199
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Runs the i nv ok e a pp ly fi le ch an ge s workflow and coordinates helper calls around a user-visible operation.
+Applies only planned paths with current validation; Strict deletion and missing-only publication enforce their policy at execution.
 
-`Invoke-ApplyFileChanges` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Pair`, `FileChanges`, `Policy`. The output is workflow-level: visible progress, result objects, changed files, or system state depending on mode.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Invoke-ApplyFileChanges` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Format-ErrorSummary`, `Resolve-DestinationPath`, `Join-PathSafe`, `Test-FileNeedsCopy`, `Copy-FileSafe`, `ConvertTo-ProcessArgumentString`.
-
-### Get-TempCleanupMinAgeMinutes
-
-- **Lines:** 2200-2209
-- **Area:** Full Mirror and robocopy workflow
-- **Primary role:** Calculates or formats g et t em pc le an up mi na ge mi nu te s data for callers that need a stable value instead of duplicating the logic.
-
-`Get-TempCleanupMinAgeMinutes` belongs to the **Full Mirror and robocopy workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on pair configuration, selected mirror policy, robocopy availability, exclusion settings, and parsed robocopy output.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is applying the wrong mirror policy. Full Mirror keeps policy selection explicit and supports preview before apply.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-TempCleanupMinAgeMinutes` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** strict mirror, update-keep-extras, missing-only, preview, apply, and robocopy parsing.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Test-InternalTempCleanupFileName
-
-- **Lines:** 2210-2215
-- **Area:** Full Mirror and robocopy workflow
-- **Primary role:** Evaluates the t es t i nt er na lt em pc le an up fi le na me condition and lets the caller choose a safe branch based on a clear result.
-
-`Test-InternalTempCleanupFileName` belongs to the **Full Mirror and robocopy workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on pair configuration, selected mirror policy, robocopy availability, exclusion settings, and parsed robocopy output.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Name`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is applying the wrong mirror policy. Full Mirror keeps policy selection explicit and supports preview before apply.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-InternalTempCleanupFileName` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** strict mirror, update-keep-extras, missing-only, preview, apply, and robocopy parsing.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:3745](../../MiraQueue.ps1#L3745)
+- Parameters: `Pair`, `FileChanges`, `Policy`.
+- Direct internal calls: `Apply-OneEntry`, `Get-QueuePathDepth`, `Invoke-ParallelFileTransfers`, `Test-DestRootAvailable`.
 
 ### Test-PathInsideRoot
 
-- **Lines:** 2216-2228
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Evaluates the t es t p at hi ns id er oo t condition and lets the caller choose a safe branch based on a clear result.
+Checks whether a path lies within the specified root boundary.
 
-`Test-PathInsideRoot` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
+- Source: [MiraQueue.ps1:3772](../../MiraQueue.ps1#L3772)
+- Parameters: `Root`, `Path`.
+- Direct internal calls: none.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Root`, `Path`. The caller expects a boolean or compact status object that can be used immediately in a branch.
+### Invoke-FullMirrorApplyResults
 
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
+Applies changed valid pair plans, reports scan/apply errors and always preserves the watcher queue.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-PathInsideRoot` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
-
-### Test-TempCleanupFileEligible
-
-- **Lines:** 2229-2247
-- **Area:** Full Mirror and robocopy workflow
-- **Primary role:** Evaluates the t es t t em pc le an up fi le el ig ib le condition and lets the caller choose a safe branch based on a clear result.
-
-`Test-TempCleanupFileEligible` belongs to the **Full Mirror and robocopy workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on pair configuration, selected mirror policy, robocopy availability, exclusion settings, and parsed robocopy output.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `FullPath`, `DestRoot`, `NowUtc`. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is applying the wrong mirror policy. Full Mirror keeps policy selection explicit and supports preview before apply.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-TempCleanupFileEligible` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** strict mirror, update-keep-extras, missing-only, preview, apply, and robocopy parsing.
-- **Dependency notes:** Notable internal calls: `Get-TempCleanupMinAgeMinutes`, `Test-InternalTempCleanupFileName`, `Test-PathInsideRoot`.
-
-### Invoke-TempCleanupChanges
-
-- **Lines:** 2248-2271
-- **Area:** Full Mirror and robocopy workflow
-- **Primary role:** Runs the i nv ok e t em pc le an up ch an ge s workflow and coordinates helper calls around a user-visible operation.
-
-`Invoke-TempCleanupChanges` belongs to the **Full Mirror and robocopy workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on pair configuration, selected mirror policy, robocopy availability, exclusion settings, and parsed robocopy output.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Pair`, `FileChanges`. The output is workflow-level: visible progress, result objects, changed files, or system state depending on mode.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is applying the wrong mirror policy. Full Mirror keeps policy selection explicit and supports preview before apply.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Invoke-TempCleanupChanges` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** strict mirror, update-keep-extras, missing-only, preview, apply, and robocopy parsing.
-- **Dependency notes:** Notable internal calls: `Format-ErrorSummary`, `Resolve-DestinationPath`, `Join-PathSafe`, `Test-TempCleanupFileEligible`.
+- Source: [MiraQueue.ps1:3789](../../MiraQueue.ps1#L3789)
+- Parameters: `Pairs`, `PreviewResults`, `Policy`.
+- Direct internal calls: `Invoke-ApplyFileChanges`, `Show-ApplyResults`, `Wait-Back`, `Write-Color`, `Write-Log`.
 
 ### Invoke-FullMirror
 
-- **Lines:** 2272-2370
-- **Area:** Full Mirror and robocopy workflow
-- **Primary role:** Runs the whole-tree mirror workflow by collecting policy and preview/apply choice, then delegating pair processing.
+Runs the whole-tree mirror workflow by collecting policy and preview/apply choice, then delegating pair processing.
 
-`Invoke-FullMirror` belongs to the **Full Mirror and robocopy workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on pair configuration, selected mirror policy, robocopy availability, exclusion settings, and parsed robocopy output.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is workflow-level: visible progress, result objects, changed files, or system state depending on mode.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is applying the wrong mirror policy. Full Mirror keeps policy selection explicit and supports preview before apply.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Invoke-FullMirror` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** strict mirror, update-keep-extras, missing-only, preview, apply, and robocopy parsing.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`, `Write-Color`, `Show-Header`, `Wait-Back`, `Read-KeyChoice`, `Read-EnterOrEsc`, `Request-ClearPendingQueue`, `Show-ApplyResults`, `Invoke-ApplyFileChanges`, `Invoke-TempCleanupChanges`.
+- Source: [MiraQueue.ps1:3807](../../MiraQueue.ps1#L3807)
+- Parameters: none.
+- Direct internal calls: `Enter-ApplyLock`, `Exit-ApplyLock`, `Get-Pairs`, `Get-PolicyLabel`, `Invoke-FullMirrorApplyResults`, `Invoke-FullMirrorScan`, `Read-EnterOrEsc`, `Read-KeyChoice`, `Show-Header`, `Show-RobocopyResults`, `Test-AllDriveMapsOnline`, `Wait-Back`, `Write-Color`.
 
 ### Get-PolicyLabel
 
-- **Lines:** 2371-2377
-- **Area:** Full Mirror and robocopy workflow
-- **Primary role:** Calculates or formats g et p ol ic yl ab el data for callers that need a stable value instead of duplicating the logic.
+Returns the display name for a Full Mirror policy.
 
-`Get-PolicyLabel` belongs to the **Full Mirror and robocopy workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on pair configuration, selected mirror policy, robocopy availability, exclusion settings, and parsed robocopy output.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Policy`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is applying the wrong mirror policy. Full Mirror keeps policy selection explicit and supports preview before apply.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-PolicyLabel` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** strict mirror, update-keep-extras, missing-only, preview, apply, and robocopy parsing.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:3888](../../MiraQueue.ps1#L3888)
+- Parameters: `Policy`.
+- Direct internal calls: none.
 
 ### Get-PolicyShort
 
-- **Lines:** 2378-2384
-- **Area:** Full Mirror and robocopy workflow
-- **Primary role:** Calculates or formats g et p ol ic ys ho rt data for callers that need a stable value instead of duplicating the logic.
+Returns the compact table label for a Full Mirror policy.
 
-`Get-PolicyShort` belongs to the **Full Mirror and robocopy workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on pair configuration, selected mirror policy, robocopy availability, exclusion settings, and parsed robocopy output.
+- Source: [MiraQueue.ps1:3895](../../MiraQueue.ps1#L3895)
+- Parameters: `Policy`.
+- Direct internal calls: none.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Policy`. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
+### New-FullMirrorErrorResult
 
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is applying the wrong mirror policy. Full Mirror keeps policy selection explicit and supports preview before apply.
+Creates a visible failed scan result with no actionable partial change list.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-PolicyShort` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:3910](../../MiraQueue.ps1#L3910)
+- Parameters: `Pair`, `Preview`, `Policy`, `Status`, `Message`.
+- Direct internal calls: `Get-PolicyShort`.
 
-- **Related scenario coverage:** strict mirror, update-keep-extras, missing-only, preview, apply, and robocopy parsing.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+### Invoke-FullMirrorScan
 
-### Invoke-RobocopyForPairs
+Runs bounded isolated scan runspaces and reports per-pair results/errors, disposing workers in finally.
 
-- **Lines:** 2385-2682
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Runs robocopy across valid pairs, manages parallel batches, parses output, and returns structured result summaries.
-
-`Invoke-RobocopyForPairs` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Pairs`, `Preview`, `Policy`. The output is workflow-level: visible progress, result objects, changed files, or system state depending on mode.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Invoke-RobocopyForPairs` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Resolve-DestinationPath`, `Get-RelativePath`, `Join-PathSafe`, `Test-DestRootAvailable`, `Build-RobocopyArgs`, `Decode-RobocopyExit`, `Get-RobocopySummary`, `Get-RobocopyChangeSummary`, `Test-RobocopyChangeLine`.
+- Source: [MiraQueue.ps1:3918](../../MiraQueue.ps1#L3918)
+- Parameters: `Pairs`, `Preview`, `Policy`.
+- Direct internal calls: `Get-InternalMirrorScan`, `Get-PolicyShort`, `New-FullMirrorErrorResult`.
 
 ### Show-RobocopyResults
 
-- **Lines:** 2683-2774
-- **Area:** Apply Pending copy and delete workflow
-- **Primary role:** Presents the s ho w r ob oc op yr es ul ts screen or menu and keeps display concerns separate from lower-level operations.
+Displays Full Mirror pair summaries and detailed changes.
 
-`Show-RobocopyResults` belongs to the **Apply Pending copy and delete workflow** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on queue entries, destination availability, copy settings, delete settings, and progress callbacks.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Results`, `Title`, `Pause`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is destructive or partial file changes. Apply helpers check destination availability, copy through temp files when configured, and preserve failed entries.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-RobocopyResults` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** copy, mkdir, delete, skip, already-current, missing-source, and offline-destination outcomes.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Center-Text`, `Fit-Cell`, `Show-Header`, `Wait-Back`.
+- Source: [MiraQueue.ps1:3961](../../MiraQueue.ps1#L3961)
+- Parameters: `Results`, `Title`, `Pause`.
+- Direct internal calls: `Center-Text`, `Fit-Cell`, `Show-Header`, `Wait-Back`, `Write-Color`.
 
 ### Show-Status
 
-- **Lines:** 2775-2803
-- **Area:** Menus, reports, and status screens
-- **Primary role:** Presents the s ho w s ta tu s screen or menu and keeps display concerns separate from lower-level operations.
+Displays configuration, watcher, queue and destination status.
 
-`Show-Status` belongs to the **Menus, reports, and status screens** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on current config, queue summaries, drive availability, and user key choices.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-Status` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** main menu routing, status reports, submenus, and user navigation.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`, `Write-Color`, `Show-Header`, `Wait-Back`, `Resolve-DestinationPath`, `Test-DestRootAvailable`, `Read-QueueEntries`, `Get-LatestQueueEntries`, `Get-WatcherProcesses`.
+- Source: [MiraQueue.ps1:4053](../../MiraQueue.ps1#L4053)
+- Parameters: none.
+- Direct internal calls: `Get-LatestQueueEntries`, `Get-OwnedScheduledTask`, `Get-Pairs`, `Get-WatcherProcesses`, `Read-QueueEntries`, `Resolve-DestinationPath`, `Show-Header`, `Test-DestRootAvailableFast`, `Wait-Back`, `Write-Color`.
 
 ### Show-Pairs
 
-- **Lines:** 2804-2817
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Presents the s ho w p ai rs screen or menu and keeps display concerns separate from lower-level operations.
+Lists configured source/destination pairs.
 
-`Show-Pairs` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-Pairs` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`, `Write-Color`.
+- Source: [MiraQueue.ps1:4082](../../MiraQueue.ps1#L4082)
+- Parameters: none.
+- Direct internal calls: `Get-Pairs`, `Write-Color`.
 
 ### Manage-PathsMenu
 
-- **Lines:** 2818-2837
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Presents the m an ag e p at hs me nu screen or menu and keeps display concerns separate from lower-level operations.
+Presents the add, edit and remove pair actions.
 
-`Manage-PathsMenu` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Manage-PathsMenu` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Read-KeyChoice`, `Show-Pairs`, `Add-Pair`, `Edit-Pair`, `Remove-Pair`.
+- Source: [MiraQueue.ps1:4096](../../MiraQueue.ps1#L4096)
+- Parameters: none.
+- Direct internal calls: `Add-Pair`, `Edit-Pair`, `Read-KeyChoice`, `Remove-Pair`, `Show-Header`, `Show-Pairs`, `Write-Color`.
 
 ### Add-Pair
 
-- **Lines:** 2838-2864
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the a dd p ai r state in one named place so the rest of the script does not duplicate update rules.
+Prompts for source and destination paths, validates them and saves a new pair.
 
-`Add-Pair` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Add-Pair` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Get-Pairs`, `Set-Pairs`, `Set-MapArray`, `Write-Color`, `Show-Header`, `Show-SpinnerLine`, `Read-LineOrEsc`, `Read-EnterOrEsc`, `Normalize-PathText`.
+- Source: [MiraQueue.ps1:4116](../../MiraQueue.ps1#L4116)
+- Parameters: none.
+- Direct internal calls: `Assert-PairLayout`, `Get-AutoPairName`, `Get-Pairs`, `Normalize-PathText`, `Read-EnterOrEsc`, `Read-LineOrEsc`, `Save-Config`, `Set-MapArray`, `Set-Pairs`, `Show-Header`, `Show-SpinnerLine`, `Write-Color`.
 
 ### Select-PairIndex
 
-- **Lines:** 2865-2875
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Provides the s el ec t p ai ri nd ex helper behavior used by nearby workflows.
+Prompts the user to select a configured pair.
 
-`Select-PairIndex` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Select-PairIndex` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`, `Read-NumberOrEsc`, `Show-Pairs`.
+- Source: [MiraQueue.ps1:4147](../../MiraQueue.ps1#L4147)
+- Parameters: none.
+- Direct internal calls: `Get-Pairs`, `Read-NumberOrEsc`, `Show-Pairs`.
 
 ### Edit-Pair
 
-- **Lines:** 2876-2901
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Provides the e di t p ai r helper behavior used by nearby workflows.
+Edits and saves the selected pair's source and destination paths.
 
-`Edit-Pair` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Edit-Pair` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Get-Pairs`, `Set-Pairs`, `Get-MapArray`, `Set-MapArray`, `Write-Color`, `Show-Header`, `Read-LineOrEsc`, `Normalize-PathText`, `Get-AutoPairName`.
+- Source: [MiraQueue.ps1:4158](../../MiraQueue.ps1#L4158)
+- Parameters: none.
+- Direct internal calls: `Get-MapArray`, `Get-Pairs`, `Normalize-PathText`, `Read-LineOrEsc`, `Save-Config`, `Select-PairIndex`, `Set-MapArray`, `Set-Pairs`, `Show-Header`, `Write-Color`.
 
 ### Remove-Pair
 
-- **Lines:** 2902-2916
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the r em ov e p ai r state in one named place so the rest of the script does not duplicate update rules.
+Removes the selected pair from configuration after confirmation.
 
-`Remove-Pair` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Remove-Pair` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Get-Pairs`, `Set-Pairs`, `Write-Color`, `Show-Header`, `Read-EnterOrEsc`, `Select-PairIndex`.
+- Source: [MiraQueue.ps1:4182](../../MiraQueue.ps1#L4182)
+- Parameters: none.
+- Direct internal calls: `Get-Pairs`, `Read-EnterOrEsc`, `Save-Config`, `Select-PairIndex`, `Set-Pairs`, `Show-Header`, `Write-Color`.
 
 ### Add-SmartExclusion
 
-- **Lines:** 2917-2975
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the a dd s ma rt ex cl us io n state in one named place so the rest of the script does not duplicate update rules.
+Builds an exclusion from the selected path and scope.
 
-`Add-SmartExclusion` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Add-SmartExclusion` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Get-Array`, `Get-Pairs`, `Get-MapArray`, `Set-MapArray`, `Write-Color`, `Show-Header`, `Wait-Back`, `Read-LineOrEsc`, `Normalize-PathText`.
+- Source: [MiraQueue.ps1:4197](../../MiraQueue.ps1#L4197)
+- Parameters: none.
+- Direct internal calls: `Get-Array`, `Get-MapArray`, `Get-Pairs`, `Normalize-PathText`, `Read-LineOrEsc`, `Save-Config`, `Set-MapArray`, `Show-Header`, `Test-PathInsideRoot`, `Wait-Back`, `Write-Color`.
 
 ### Manage-ExclusionsMenu
 
-- **Lines:** 2976-3008
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Presents the m an ag e e xc lu si on sm en u screen or menu and keeps display concerns separate from lower-level operations.
+Presents actions for viewing, adding and removing exclusions.
 
-`Manage-ExclusionsMenu` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Manage-ExclusionsMenu` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Wait-Back`, `Read-KeyChoice`, `Add-Pair`, `Add-SmartExclusion`, `Add-GlobalExclusion`, `Add-PairExclusion`, `Show-Exclusions`, `Remove-Exclusion`.
+- Source: [MiraQueue.ps1:4256](../../MiraQueue.ps1#L4256)
+- Parameters: none.
+- Direct internal calls: `Add-GlobalExclusion`, `Add-PairExclusion`, `Add-SmartExclusion`, `Read-KeyChoice`, `Remove-Exclusion`, `Show-Exclusions`, `Show-Header`, `Wait-Back`, `Write-Color`.
 
 ### Add-GlobalExclusion
 
-- **Lines:** 3009-3019
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the a dd g lo ba le xc lu si on state in one named place so the rest of the script does not duplicate update rules.
+Adds and saves a global file or directory exclusion.
 
-`Add-GlobalExclusion` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `PropName`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Add-GlobalExclusion` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Get-Array`, `Show-Header`, `Read-LineOrEsc`.
+- Source: [MiraQueue.ps1:4289](../../MiraQueue.ps1#L4289)
+- Parameters: `PropName`.
+- Direct internal calls: `Get-Array`, `Read-LineOrEsc`, `Save-Config`, `Show-Header`.
 
 ### Add-PairExclusion
 
-- **Lines:** 3020-3034
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the a dd p ai re xc lu si on state in one named place so the rest of the script does not duplicate update rules.
+Adds and saves an exclusion for a selected pair.
 
-`Add-PairExclusion` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `MapName`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Add-PairExclusion` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Get-Pairs`, `Get-MapArray`, `Set-MapArray`, `Show-Header`, `Read-LineOrEsc`, `Add-Pair`, `Select-PairIndex`.
+- Source: [MiraQueue.ps1:4300](../../MiraQueue.ps1#L4300)
+- Parameters: `MapName`.
+- Direct internal calls: `Get-MapArray`, `Get-Pairs`, `Read-LineOrEsc`, `Save-Config`, `Select-PairIndex`, `Set-MapArray`, `Show-Header`.
 
 ### Get-ExclusionEntries
 
-- **Lines:** 3035-3056
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Calculates or formats g et e xc lu si on en tr ie s data for callers that need a stable value instead of duplicating the logic.
+Collects global and per-pair exclusions for display and selection.
 
-`Get-ExclusionEntries` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-ExclusionEntries` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Get-Array`.
+- Source: [MiraQueue.ps1:4315](../../MiraQueue.ps1#L4315)
+- Parameters: none.
+- Direct internal calls: `Get-Array`.
 
 ### Show-Exclusions
 
-- **Lines:** 3057-3070
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Presents the s ho w e xc lu si on s screen or menu and keeps display concerns separate from lower-level operations.
+Displays configured exclusion entries.
 
-`Show-Exclusions` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-Exclusions` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Get-ExclusionEntries`.
+- Source: [MiraQueue.ps1:4337](../../MiraQueue.ps1#L4337)
+- Parameters: none.
+- Direct internal calls: `Get-ExclusionEntries`, `Show-Header`, `Write-Color`.
 
 ### Remove-Exclusion
 
-- **Lines:** 3071-3094
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the r em ov e e xc lu si on state in one named place so the rest of the script does not duplicate update rules.
+Removes the selected exclusion while protecting required defaults.
 
-`Remove-Exclusion` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Remove-Exclusion` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Get-Array`, `Get-MapArray`, `Set-MapArray`, `Wait-Back`, `Read-NumberOrEsc`, `Get-ExclusionEntries`, `Show-Exclusions`.
+- Source: [MiraQueue.ps1:4351](../../MiraQueue.ps1#L4351)
+- Parameters: none.
+- Direct internal calls: `Get-Array`, `Get-ExclusionEntries`, `Get-MapArray`, `Read-NumberOrEsc`, `Save-Config`, `Set-MapArray`, `Show-Exclusions`, `Wait-Back`.
 
 ### SettingsMenu
 
-- **Lines:** 3095-3124
-- **Area:** Configuration and settings
-- **Primary role:** Presents the s et ti ng sm en u screen or menu and keeps display concerns separate from lower-level operations.
+Presents editable application settings and drive-map actions.
 
-`SettingsMenu` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `SettingsMenu` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Read-KeyChoice`, `Manage-DriveMapsMenu`, `Set-IntSetting`, `Set-StringSetting`, `Toggle-BoolSetting`.
+- Source: [MiraQueue.ps1:4375](../../MiraQueue.ps1#L4375)
+- Parameters: none.
+- Direct internal calls: `Manage-DriveMapsMenu`, `Read-KeyChoice`, `Set-IntSetting`, `Set-RangedIntSetting`, `Set-StringSetting`, `Show-Header`, `Toggle-BoolSetting`, `Write-Color`.
 
 ### Manage-DriveMapsMenu
 
-- **Lines:** 3125-3150
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Presents the m an ag e d ri ve ma ps me nu screen or menu and keeps display concerns separate from lower-level operations.
+Presents actions for viewing, editing and removing configured drive maps.
 
-`Manage-DriveMapsMenu` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Manage-DriveMapsMenu` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Read-KeyChoice`, `Add-OrUpdateDriveMap`, `Remove-DriveMap`.
+- Source: [MiraQueue.ps1:4407](../../MiraQueue.ps1#L4407)
+- Parameters: none.
+- Direct internal calls: `Add-OrUpdateDriveMap`, `Read-KeyChoice`, `Remove-DriveMap`, `Show-Header`, `Write-Color`.
 
 ### Add-OrUpdateDriveMap
 
-- **Lines:** 3151-3160
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the a dd o ru pd at ed ri ve ma p state in one named place so the rest of the script does not duplicate update rules.
+Saves a drive-prefix substitution in the application configuration.
 
-`Add-OrUpdateDriveMap` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Add-OrUpdateDriveMap` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Show-Header`, `Read-LineOrEsc`.
+- Source: [MiraQueue.ps1:4433](../../MiraQueue.ps1#L4433)
+- Parameters: none.
+- Direct internal calls: `Read-LineOrEsc`, `Save-Config`, `Show-Header`.
 
 ### Remove-DriveMap
 
-- **Lines:** 3161-3180
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Mutates the r em ov e d ri ve ma p state in one named place so the rest of the script does not duplicate update rules.
+Removes a selected drive-prefix substitution from configuration.
 
-`Remove-DriveMap` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Remove-DriveMap` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Write-Color`, `Show-Header`, `Wait-Back`, `Read-NumberOrEsc`.
+- Source: [MiraQueue.ps1:4443](../../MiraQueue.ps1#L4443)
+- Parameters: none.
+- Direct internal calls: `Read-NumberOrEsc`, `Save-Config`, `Show-Header`, `Wait-Back`, `Write-Color`.
 
 ### Set-IntSetting
 
-- **Lines:** 3181-3195
-- **Area:** Configuration and settings
-- **Primary role:** Mutates the s et i nt se tt in g state in one named place so the rest of the script does not duplicate update rules.
+Prompts for, validates and saves a bounded integer setting.
 
-`Set-IntSetting` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
+- Source: [MiraQueue.ps1:4463](../../MiraQueue.ps1#L4463)
+- Parameters: `Name`, `Min`.
+- Direct internal calls: `Read-LineOrEsc`, `Save-Config`, `Show-Header`, `Wait-Back`, `Write-Color`.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Name`, `Min`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
+### Set-RangedIntSetting
 
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
+Edits an integer setting only within its supported inclusive range and saves configuration.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Set-IntSetting` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Write-Color`, `Show-Header`, `Wait-Back`, `Read-LineOrEsc`.
+- Source: [MiraQueue.ps1:4478](../../MiraQueue.ps1#L4478)
+- Parameters: `Name`, `Min`, `Max`.
+- Direct internal calls: `Read-LineOrEsc`, `Save-Config`, `Show-Header`, `Wait-Back`, `Write-Color`.
 
 ### Set-StringSetting
 
-- **Lines:** 3196-3205
-- **Area:** Configuration and settings
-- **Primary role:** Mutates the s et s tr in gs et ti ng state in one named place so the rest of the script does not duplicate update rules.
+Prompts for and saves a string setting.
 
-`Set-StringSetting` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Name`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Set-StringSetting` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** Notable internal calls: `Save-Config`, `Initialize-App`, `Show-Header`, `Read-LineOrEsc`.
+- Source: [MiraQueue.ps1:4493](../../MiraQueue.ps1#L4493)
+- Parameters: `Name`.
+- Direct internal calls: `Initialize-App`, `Read-LineOrEsc`, `Save-Config`, `Show-Header`.
 
 ### Toggle-BoolSetting
 
-- **Lines:** 3206-3211
-- **Area:** Configuration and settings
-- **Primary role:** Provides the t og gl e b oo ls et ti ng helper behavior used by nearby workflows.
+Toggles and saves a Boolean setting.
 
-`Toggle-BoolSetting` belongs to the **Configuration and settings** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It mainly depends on `$script:Config`, `$script:ConfigPath`, and the default config shape. When it writes data, the write is intentional configuration persistence.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Name`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is invalid or incomplete configuration. The surrounding workflow either repairs missing shape or reports malformed JSON instead of guessing.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Toggle-BoolSetting` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** first run, config repair, settings edits, and watcher refresh.
-- **Dependency notes:** Notable internal calls: `Save-Config`.
+- Source: [MiraQueue.ps1:4503](../../MiraQueue.ps1#L4503)
+- Parameters: `Name`.
+- Direct internal calls: `Save-Config`.
 
 ### Install-Required
 
-- **Lines:** 3212-3246
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Creates the scheduled watcher task after elevation checks and starts it so watch mode can run at logon.
+Creates the scheduled watcher task after elevation checks and starts it so watch mode can run at logon.
 
-`Install-Required` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Install-Required` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Write-Log`, `Show-Header`, `Wait-Back`, `New-HiddenWatchLauncher`, `Test-IsAdministrator`, `Invoke-ElevatedMode`, `Show-PostElevatedTaskStatus`, `Remove-KnownScheduledTasks`, `Stop-KnownWatcherProcesses`.
+- Source: [MiraQueue.ps1:4509](../../MiraQueue.ps1#L4509)
+- Parameters: none.
+- Direct internal calls: `Get-OwnedScheduledTask`, `Invoke-ElevatedMode`, `New-HiddenWatchLauncher`, `Remove-KnownScheduledTasks`, `Show-Header`, `Show-PostElevatedTaskStatus`, `Stop-KnownWatcherProcesses`, `Test-IsAdministrator`, `Test-OwnedScheduledTask`, `Wait-Back`, `Write-Color`, `Write-Log`.
 
 ### New-HiddenWatchLauncher
 
-- **Lines:** 3247-3261
-- **Area:** Shared core helper
-- **Primary role:** Writes the hidden VBS launcher that starts MiraQueue watch mode from the recorded script directory.
+Writes a Unicode VBS helper that reads the Unicode script-directory pointer and starts hidden Watch mode.
 
-`New-HiddenWatchLauncher` belongs to the **Shared core helper** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on explicit parameters and script-scoped state supplied indirectly by the caller.
+- Source: [MiraQueue.ps1:4546](../../MiraQueue.ps1#L4546)
+- Parameters: none.
+- Direct internal calls: none.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
+### Test-RuntimePathProtected
 
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
+Detects runtime/config paths inside configured source or destination trees so cleanup preserves them.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `New-HiddenWatchLauncher` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:4561](../../MiraQueue.ps1#L4561)
+- Parameters: `Path`.
+- Direct internal calls: `Get-Pairs`, `Resolve-DestinationPath`, `Test-PathInsideRoot`.
 
-- **Related scenario coverage:** shared workflow support across the script.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+### Remove-OwnedRuntimeData
+
+Deletes exact runtime allowlisted files and owned log rotations, preserving unknown DataDir content.
+
+- Source: [MiraQueue.ps1:4573](../../MiraQueue.ps1#L4573)
+- Parameters: none.
+- Direct internal calls: `Remove-OwnedPath`, `Test-PathInsideRoot`, `Test-RuntimePathProtected`.
 
 ### Uninstall-Everything
 
-- **Lines:** 3262-3323
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Removes MiraQueue-created scheduled task resources, runtime data, config, and shortcuts while preserving user source and destination folders.
+Confirms removal, stops the owned watcher, locks runtime storage and deletes only owned files; preserves backup content and user shortcuts.
 
-`Uninstall-Everything` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Uninstall-Everything` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Wait-Back`, `Read-EnterOrEsc`, `Test-IsAdministrator`, `Invoke-ElevatedMode`, `Show-PostElevatedTaskStatus`, `Remove-KnownScheduledTasks`, `Stop-KnownWatcherProcesses`.
+- Source: [MiraQueue.ps1:4586](../../MiraQueue.ps1#L4586)
+- Parameters: none.
+- Direct internal calls: `Enter-ApplyLock`, `Enter-QueueMutex`, `Exit-ApplyLock`, `Exit-QueueMutex`, `Invoke-ElevatedMode`, `Read-EnterOrEsc`, `Remove-KnownScheduledTasks`, `Remove-OwnedPath`, `Remove-OwnedRuntimeData`, `Show-Header`, `Stop-KnownWatcherProcesses`, `Test-IsAdministrator`, `Test-RuntimePathProtected`, `Wait-Back`, `Write-Color`.
 
 ### Test-IsAdministrator
 
-- **Lines:** 3324-3333
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Evaluates the t es t i sa dm in is tr at or condition and lets the caller choose a safe branch based on a clear result.
+Checks whether the current Windows identity has administrator privileges.
 
-`Test-IsAdministrator` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-IsAdministrator` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+- Source: [MiraQueue.ps1:4610](../../MiraQueue.ps1#L4610)
+- Parameters: none.
+- Direct internal calls: none.
 
 ### Invoke-ElevatedMode
 
-- **Lines:** 3334-3348
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Runs the i nv ok e e le va te dm od e workflow and coordinates helper calls around a user-visible operation.
+Invokes elevated PowerShell directly with quoted arguments; avoids a shell-composed command string.
 
-`Invoke-ElevatedMode` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `TargetMode`. The output is workflow-level: visible progress, result objects, changed files, or system state depending on mode.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Invoke-ElevatedMode` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** Notable internal calls: `Write-Color`.
+- Source: [MiraQueue.ps1:4620](../../MiraQueue.ps1#L4620)
+- Parameters: `TargetMode`.
+- Direct internal calls: `ConvertTo-ProcessArgumentString`, `Write-Color`.
 
 ### Show-PostElevatedTaskStatus
 
-- **Lines:** 3349-3378
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Presents the s ho w p os te le va te dt as ks ta tu s screen or menu and keeps display concerns separate from lower-level operations.
+Displays the owned scheduled task's status after an elevated operation.
 
-`Show-PostElevatedTaskStatus` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `Operation`. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-PostElevatedTaskStatus` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Get-WatcherProcesses`.
+- Source: [MiraQueue.ps1:4629](../../MiraQueue.ps1#L4629)
+- Parameters: `Operation`.
+- Direct internal calls: `Get-OwnedScheduledTask`, `Get-WatcherProcesses`, `Write-Color`.
 
 ### Remove-KnownScheduledTasks
 
-- **Lines:** 3379-3394
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Mutates the r em ov e k no wn sc he du le dt as ks state in one named place so the rest of the script does not duplicate update rules.
+Unregisters only a task whose action matches this installation.
 
-`Remove-KnownScheduledTasks` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. Explicit parameters: `KeepTaskName`. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Remove-KnownScheduledTasks` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** Notable internal calls: `Write-Color`.
+- Source: [MiraQueue.ps1:4659](../../MiraQueue.ps1#L4659)
+- Parameters: `KeepTaskName`.
+- Direct internal calls: `Get-OwnedScheduledTask`, `Write-Color`.
 
 ### InstallMenu
 
-- **Lines:** 3395-3414
-- **Area:** Installation, scheduled task, and process lifecycle
-- **Primary role:** Presents the i ns ta ll me nu screen or menu and keeps display concerns separate from lower-level operations.
+Presents watcher installation, restart and removal actions.
 
-`InstallMenu` belongs to the **Installation, scheduled task, and process lifecycle** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on administrator rights, Task Scheduler cmdlets, watcher process discovery, runtime helper paths, and the configured task name.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is leaving background tasks or processes behind. Lifecycle helpers isolate task registration, restart, removal, and runtime cleanup.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `InstallMenu` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** install, restart, remove watcher, uninstall, elevation, and background process checks.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Read-KeyChoice`, `Install-Required`, `Uninstall-Everything`, `Restart-ScheduledWatcher`, `Remove-ScheduledWatcherOnly`.
+- Source: [MiraQueue.ps1:4670](../../MiraQueue.ps1#L4670)
+- Parameters: none.
+- Direct internal calls: `Install-Required`, `Read-KeyChoice`, `Remove-ScheduledWatcherOnly`, `Restart-ScheduledWatcher`, `Show-Header`, `Uninstall-Everything`, `Write-Color`.
 
 ### Restart-ScheduledWatcher
 
-- **Lines:** 3415-3420
-- **Area:** Watcher lifecycle and file system events
-- **Primary role:** Provides the r es ta rt s ch ed ul ed wa tc he r helper behavior used by nearby workflows.
+Restarts the owned scheduled watcher through the elevation helper.
 
-`Restart-ScheduledWatcher` belongs to the **Watcher lifecycle and file system events** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, FileSystemWatcher events, debounce timing, exclusions, and the watcher mutex.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is event bursts or missed nested directory events. Debounce buffering and directory snapshots reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Restart-ScheduledWatcher` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** manual or scheduled watch mode, created/changed/deleted/renamed events, and directory snapshots.
-- **Dependency notes:** Notable internal calls: `Refresh-WatcherAfterConfigChange`, `Show-Header`, `Wait-Back`.
+- Source: [MiraQueue.ps1:4690](../../MiraQueue.ps1#L4690)
+- Parameters: none.
+- Direct internal calls: `Refresh-WatcherAfterConfigChange`, `Show-Header`, `Wait-Back`.
 
 ### Remove-ScheduledWatcherOnly
 
-- **Lines:** 3421-3440
-- **Area:** Watcher lifecycle and file system events
-- **Primary role:** Mutates the r em ov e s ch ed ul ed wa tc he ro nl y state in one named place so the rest of the script does not duplicate update rules.
+Stops and removes the owned watcher while preserving backup configuration and queue data.
 
-`Remove-ScheduledWatcherOnly` belongs to the **Watcher lifecycle and file system events** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, FileSystemWatcher events, debounce timing, exclusions, and the watcher mutex.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is event bursts or missed nested directory events. Debounce buffering and directory snapshots reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Remove-ScheduledWatcherOnly` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** manual or scheduled watch mode, created/changed/deleted/renamed events, and directory snapshots.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Show-Header`, `Wait-Back`, `Test-IsAdministrator`, `Invoke-ElevatedMode`, `Show-PostElevatedTaskStatus`, `Remove-KnownScheduledTasks`, `Stop-KnownWatcherProcesses`.
+- Source: [MiraQueue.ps1:4696](../../MiraQueue.ps1#L4696)
+- Parameters: none.
+- Direct internal calls: `Invoke-ElevatedMode`, `Remove-KnownScheduledTasks`, `Remove-OwnedPath`, `Show-Header`, `Show-PostElevatedTaskStatus`, `Stop-KnownWatcherProcesses`, `Test-IsAdministrator`, `Wait-Back`, `Write-Color`.
 
 ### Stop-KnownWatcherProcesses
 
-- **Lines:** 3441-3452
-- **Area:** Watcher lifecycle and file system events
-- **Primary role:** Provides the s to p k no wn wa tc he rp ro ce ss es helper behavior used by nearby workflows.
+Requests a graceful stop and waits for installation-specific watchers; refuses to kill a still-flushing process.
 
-`Stop-KnownWatcherProcesses` belongs to the **Watcher lifecycle and file system events** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, FileSystemWatcher events, debounce timing, exclusions, and the watcher mutex.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The output is either updated state, a small helper value, or no direct return value depending on caller context.
-
-Side effects are intentionally bounded. This is a mutating helper. Its side effects are part of the public workflow, so callers should reach it only after validation, preview, or explicit user choice has already happened. The important failure mode is event bursts or missed nested directory events. Debounce buffering and directory snapshots reduce that risk.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Stop-KnownWatcherProcesses` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** manual or scheduled watch mode, created/changed/deleted/renamed events, and directory snapshots.
-- **Dependency notes:** Notable internal calls: `Write-Color`, `Get-WatcherProcesses`.
+- Source: [MiraQueue.ps1:4716](../../MiraQueue.ps1#L4716)
+- Parameters: none.
+- Direct internal calls: `Get-WatcherProcesses`, `Write-AtomicText`.
 
 ### Get-WatcherProcesses
 
-- **Lines:** 3453-3464
-- **Area:** Watcher lifecycle and file system events
-- **Primary role:** Calculates or formats g et w at ch er pr oc es se s data for callers that need a stable value instead of duplicating the logic.
+Matches PowerShell processes by exact -File installation path and -Mode Watch, excluding the current process.
 
-`Get-WatcherProcesses` belongs to the **Watcher lifecycle and file system events** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, FileSystemWatcher events, debounce timing, exclusions, and the watcher mutex.
+- Source: [MiraQueue.ps1:4728](../../MiraQueue.ps1#L4728)
+- Parameters: none.
+- Direct internal calls: none.
 
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a derived object, string, number, or collection and should not need to know how it was produced.
+### Test-OwnedScheduledTask
 
-Side effects are intentionally bounded. It may participate in long-running watcher state, but the watcher contract remains queue-only: it records work and does not apply file changes. The important failure mode is event bursts or missed nested directory events. Debounce buffering and directory snapshots reduce that risk.
+Checks the task's executable and exact generated launcher argument before any lifecycle mutation.
 
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Get-WatcherProcesses` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
+- Source: [MiraQueue.ps1:4737](../../MiraQueue.ps1#L4737)
+- Parameters: `Task`.
+- Direct internal calls: none.
 
-- **Related scenario coverage:** manual or scheduled watch mode, created/changed/deleted/renamed events, and directory snapshots.
-- **Dependency notes:** No notable internal function calls were detected in this function body.
+### Get-OwnedScheduledTask
+
+Locates the exact root-folder configured task only when its action belongs to this installation.
+
+- Source: [MiraQueue.ps1:4745](../../MiraQueue.ps1#L4745)
+- Parameters: `TaskName`.
+- Direct internal calls: `Test-OwnedScheduledTask`.
 
 ### Test-AllDriveMapsOnline
 
-- **Lines:** 3465-3483
-- **Area:** Path, pair, drive map, and exclusion handling
-- **Primary role:** Evaluates the t es t a ll dr iv em ap so nl in e condition and lets the caller choose a safe branch based on a clear result.
+Checks distinct destination roots and returns their combined availability and offline list.
 
-`Test-AllDriveMapsOnline` belongs to the **Path, pair, drive map, and exclusion handling** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on configured pairs, drive maps, exclusion maps, and path text supplied by the user or file system events.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The caller expects a boolean or compact status object that can be used immediately in a branch.
-
-Side effects are intentionally bounded. It is expected to be side-effect-light and primarily returns data or decisions to the caller. The important failure mode is pointing at the wrong folder. Path helpers centralize normalization and destination resolution so previews and applies use the same interpretation.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Test-AllDriveMapsOnline` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** adding pairs, resolving destinations, drive maps, and exclusions.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`.
+- Source: [MiraQueue.ps1:4752](../../MiraQueue.ps1#L4752)
+- Parameters: `Fast`.
+- Direct internal calls: `Get-Pairs`, `Resolve-DestinationPath`, `Test-DestRootAvailableFast`.
 
 ### Show-MainMenu
 
-- **Lines:** 3484-3529
-- **Area:** Menus, reports, and status screens
-- **Primary role:** Renders the main interactive command hub and routes user choices into the major workflows.
+Renders the main interactive command hub and routes user choices into the major workflows.
 
-`Show-MainMenu` belongs to the **Menus, reports, and status screens** layer of MiraQueue. In practical terms, this means it is part of the path from user intent to a safe, inspectable backup action rather than an isolated utility with no workflow meaning. It depends on current config, queue summaries, drive availability, and user key choices.
-
-When the surrounding workflow reaches this function, the expected contract is straightforward: inputs are already shaped by the caller, the function performs one named responsibility, and the caller receives either a value, a state change, or a user-visible result. No explicit function parameters; it reads from script-scoped state or acts as an internal workflow step. The main output is console presentation. Any return value is secondary to navigation or display.
-
-Side effects are intentionally bounded. Its side effect is user interaction: console output, cursor movement, or waiting for input. It should not silently perform backup changes by itself. The important failure mode is inconsistent behavior across callers, so this helper keeps one rule in one place.
-
-The reason this function exists separately is maintainability: the behavior has a name, a line range, and a documented boundary. That makes future review easier because changes to `Show-MainMenu` can be checked against this responsibility instead of being hidden inside a larger menu or copy loop.
-
-- **Related scenario coverage:** main menu routing, status reports, submenus, and user navigation.
-- **Dependency notes:** Notable internal calls: `Get-Pairs`, `Write-Color`, `Show-Header`, `Read-KeyChoice`, `Read-QueueEntries`, `Get-LatestQueueEntries`, `Remove-OrphanedUpserts`, `Clear-PendingQueue`, `Invoke-ApplyPending`, `Show-PendingPreview`.
-
+- Source: [MiraQueue.ps1:4773](../../MiraQueue.ps1#L4773)
+- Parameters: none.
+- Direct internal calls: `Clear-PendingQueue`, `Get-Pairs`, `Get-WatcherProcesses`, `InstallMenu`, `Invoke-ApplyPending`, `Invoke-FullMirror`, `Manage-ExclusionsMenu`, `Manage-PathsMenu`, `Read-KeyChoice`, `SettingsMenu`, `Show-Header`, `Show-PendingPreview`, `Show-Status`, `Sync-PendingSessionSnapshot`, `Wait-Back`, `Write-Color`, `Write-Log`.

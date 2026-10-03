@@ -1,15 +1,17 @@
-# Scheduled Task Map
+# Scheduled task map
 
 ```mermaid
-graph TD
-  A[Install-Required] --> B{Administrator?}
-  B -->|No| C[Invoke-ElevatedMode]
-  B -->|Yes| D[New-HiddenWatchLauncher]
-  D --> E[Register Scheduled Task]
-  E --> F[Start Task]
-  F --> G[MiraQueue.ps1 -Mode Watch]
-  H[Remove watcher] --> I[Stop watcher processes]
-  I --> J[Unregister configured task]
+flowchart TD
+  A[Install] --> B[Elevate PowerShell for lifecycle operation]
+  B --> C[Verify existing task ownership]
+  C --> D[Write Unicode pointer and VBS helper]
+  D --> E[Register user logon task]
+  E --> F[Hidden Watch mode]
+  G[Stop or remove] --> H[Installation-specific stop request]
+  H --> I[Wait for watcher flush]
+  I --> J[Unregister exact owned task]
+  K[Uninstall confirmation] --> L[Remove exact runtime allowlist]
+  L --> M[Preserve unrelated files and backup content]
 ```
 
-Task Scheduler gives logon startup without installing a service.
+Process matching includes the exact script path. Task matching includes the exact generated launcher action. V2 creates no shortcuts and preserves user-created ones.

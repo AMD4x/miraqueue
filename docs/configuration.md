@@ -1,43 +1,51 @@
-# Configuration
+# Configuration — V2.0.0
 
-MiraQueue creates `MiraQueue.config.json` beside `MiraQueue.ps1` on first run. The runtime folder defaults to `%LOCALAPPDATA%\\MiraQueue`.
+Config lives beside `MiraQueue.ps1`. New installations start with no pairs or mappings. Existing V1 settings and unknown user properties are preserved; missing defaults are added in memory. An explicit save writes valid JSON atomically.
 
-| Key | Default | Purpose | Safe Values | Reason |
-| --- | --- | --- | --- | --- |
-| `Version` | `"V1.0.0"` | Release marker stored in generated config. | Keep equal to shipped release. | Ties support reports to a release. |
-| `TaskName` | `"MiraQueue"` | Windows scheduled task name. | Simple unique name. | Keeps watcher installation predictable. |
-| `DataDir` | `"%LOCALAPPDATA%\\MiraQueue"` | Runtime folder. | Prefer local user storage. | Keeps runtime files away from user data. |
-| `QueueFile` | `"MiraQueue.queue.ndjson"` | Pending queue file. | Keep NDJSON. | Append-friendly and inspectable. |
-| `LogFile` | `"MiraQueue.log"` | Log file. | Keep inside DataDir. | Separates operation history. |
-| `DebounceMs` | `5000` | Delay before flushing pending events. | 0 or higher. | Reduces repeated editor/copy events. |
-| `WatchBufferKB` | `1024` | Watcher buffer size. | 4 or higher. | Reduces event loss during bursts. |
-| `LogRetentionDays` | `30` | Rotated log retention. | 0 disables cleanup. | Bounds runtime growth. |
-| `PreserveModifiedTime` | `true` | Preserves source modified time. | true for fidelity. | Avoids needless later copies. |
-| `CopyAttributes` | `false` | Reserved attribute preference. | false for normal use. | Keeps behavior conservative. |
-| `CopyTempThenReplace` | `true` | Uses temp copy before replacement. | true recommended. | Reduces partial final files. |
-| `DeleteDestOnSourceDelete` | `true` | Allows pending deletes. | false for manual delete review. | Makes mirror behavior explicit. |
-| `TimeToleranceSeconds` | `2` | Timestamp comparison tolerance. | 1-5 typical. | Avoids precision churn. |
-| `DirectoryScanMaxItems` | `500000` | Directory snapshot limit. | Raise only for very large trees. | Prevents runaway scans. |
-| `RobocopyThreads` | `8` | Robocopy thread count. | 1 or higher. | Balances throughput and load. |
-| `RobocopyRetries` | `1` | Robocopy retry count. | 0 or higher. | Keeps failures visible. |
-| `RobocopyWaitSeconds` | `1` | Robocopy retry wait. | 0 or higher. | Pairs with retry count. |
-| `RobocopyParallelBatches` | `3` | Concurrent full mirror pairs. | 1 or higher. | Speeds multi-pair runs. |
-| `TempCleanupMinAgeMinutes` | `10` | Temp cleanup age. | 1 or higher. | Avoids active temp removal. |
-| `DriveMaps` | `{}` | Drive mappings. | Drive root to target. | Improves destination health checks. |
-| `Pairs` | `[]` | Source/destination relationships. | Name, Source, Dest. | Core backup list. |
-| `GlobalExcludeDirs` | `system folders` | Folders skipped for all pairs. | Names or patterns. | Avoids system metadata folders. |
-| `GlobalExcludeFiles` | `common temp files` | Files skipped for all pairs. | Names or patterns. | Avoids transient files. |
-| `PairExcludeDirs` | `{}` | Per-pair folder skips. | Keys match pair names. | Pair-specific filtering. |
-| `PairExcludeFiles` | `{}` | Per-pair file skips. | Keys match pair names. | Pair-specific filtering. |
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `Version` | `"V2.0.0"` | Product marker. Saved as V2.0.0; independent of queue schema 2. |
+| `TaskName` | `"MiraQueue"` | Exact root-folder logon task name. Ownership is verified by its action; no wildcards. |
+| `DataDir` | `"%LOCALAPPDATA%\\MiraQueue"` | Local runtime storage; cannot be a filesystem root, reparse path or inside a backup pair. |
+| `QueueFile` | `"MiraQueue.queue.ndjson"` | Simple queue filename inside DataDir. Cannot alias another runtime file. |
+| `LogFile` | `"MiraQueue.log"` | Simple log filename, distinct from the queue and reserved runtime names. |
+| `DebounceMs` | `5000` | Delay before committing buffered watcher events (milliseconds); nonnegative. |
+| `WatchBufferKB` | `1024` | Retained V1 preference; effective buffer is clamped to 4–64 KiB for Windows/network compatibility. |
+| `LogRetentionDays` | `30` | Retention for this log's timestamped rotations. 0 disables age cleanup. |
+| `PreserveModifiedTime` | `true` | Preserve source modification times on copied files/directories where supported. |
+| `CopyAttributes` | `false` | Apply source attributes after copy; false leaves normal destination defaults. |
+| `CopyTempThenReplace` | `true` | Use a sibling temp file then replace. Recommended true; missing-only always publishes without overwrite. |
+| `DeleteDestOnSourceDelete` | `true` | Allow pending deletion. False retains delete entries. Does not disable explicitly selected Strict Full Mirror. |
+| `TimeToleranceSeconds` | `2` | Absolute modification-time tolerance for size/time comparison; nonnegative seconds. |
+| `DirectoryScanMaxItems` | `500000` | Maximum queued child snapshot size. The root directory transfer remains available for full tree copying. |
+| `RobocopyThreads` | `8` | Directory staging transport threads, 1–128. |
+| `RobocopyRetries` | `1` | Directory staging retry count, nonnegative. |
+| `RobocopyWaitSeconds` | `1` | Directory staging seconds between retries, nonnegative. |
+| `RobocopyParallelBatches` | `3` | Compatible existing key; now bounds internal Full Mirror pair scans (effective 1–32). |
+| `ParallelFileTransfers` | `4` | Concurrent individual file workers, 1–32. Missing/invalid values use 4; conflicting destinations serialize. |
+| `DriveMaps` | `{}` | Optional logical drive-root to destination prefix substitutions. No Windows mappings are installed. |
+| `Pairs` | `[]` | Unique case-insensitive Name, absolute Source and absolute Dest for each nonoverlapping pair. |
+| `GlobalExcludeDirs` | `["System Volume Information","$Recycle.Bin","RECYCLER","Recovery"]` | Directory names/patterns applied to all pairs. |
+| `GlobalExcludeFiles` | `["Thumbs.db","desktop.ini","*.tmp","*.crdownload","*.part","*.download","*.mqtmp-*","*.mqbackup-*"]` | File names/patterns applied to all pairs; internal temp/stage names are also protected in code. |
+| `PairExcludeDirs` | `{}` | Map of stable pair names to directory-name or relative-subtree patterns. |
+| `PairExcludeFiles` | `{}` | Map of stable pair names to filename or relative-file patterns. |
 
-## Pair Shape
+## Pair example
 
 ```json
 {
-  "Name": "DemoProject",
-  "Source": "C:\\\\Demo\\\\Source",
-  "Dest": "D:\\\\DemoBackup\\\\Source"
+  "Name": "Documents",
+  "Source": "C:\\Demo\\Documents",
+  "Dest": "D:\\DemoBackup\\Documents"
 }
 ```
 
-`Name` keys per-pair exclusions. `Source` must be a folder. `Dest` is resolved through drive maps when applicable.
+Names identify queue work and per-pair exclusions; do not manually rename them while work is pending. Changing roots leaves old queued work retained for review rather than redirecting it. Exclusions use PowerShell wildcard syntax; literal brackets in patterns require escaping. Regular filenames containing brackets/Unicode are handled literally by file operations.
+
+## V1 compatibility
+
+The shipped [example](../examples/MiraQueue.config.example.json) has exactly the current default keys. Only its demonstration pair/exclusion-map entries differ; it has no active network map. Never overwrite your own config with it during upgrade.
+
+`TempCleanupMinAgeMinutes` is a legacy V1 property: existing configs preserve it, but V2 no longer uses age-based sweeping as proof that another operation's staging is abandoned. It is omitted from new defaults/examples. Each operation still cleans its own temp/stage files in finally. Other existing exclusion patterns remain unchanged, including narrow legacy temporary-file exclusions.
+
+`Version` is a product marker. Queue and metadata contain their own `SchemaVersion=2`; do not edit either to match a product string.

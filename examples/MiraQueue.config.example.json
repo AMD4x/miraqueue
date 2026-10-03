@@ -1,5 +1,5 @@
 {
-  "Version": "V1.0.0",
+  "Version": "V2.0.0",
   "TaskName": "MiraQueue",
   "DataDir": "%LOCALAPPDATA%\\MiraQueue",
   "QueueFile": "MiraQueue.queue.ndjson",
@@ -17,15 +17,13 @@
   "RobocopyRetries": 1,
   "RobocopyWaitSeconds": 1,
   "RobocopyParallelBatches": 3,
-  "TempCleanupMinAgeMinutes": 10,
-  "DriveMaps": {
-    "D:": "D:\\DemoBackup"
-  },
+  "ParallelFileTransfers": 4,
+  "DriveMaps": {},
   "Pairs": [
     {
-      "Name": "DemoProject",
-      "Source": "C:\\Demo\\Source",
-      "Dest": "D:\\DemoBackup\\Source"
+      "Name": "Documents",
+      "Source": "C:\\Demo\\Documents",
+      "Dest": "D:\\DemoBackup\\Documents"
     }
   ],
   "GlobalExcludeDirs": [
@@ -41,17 +39,13 @@
     "*.crdownload",
     "*.part",
     "*.download",
-    "*.mbtmp-*"
+    "*.mqtmp-*",
+    "*.mqbackup-*"
   ],
   "PairExcludeDirs": {
-    "DemoProject": [
-      "node_modules",
-      ".git"
-    ]
+    "Documents": []
   },
   "PairExcludeFiles": {
-    "DemoProject": [
-      "*.cache"
-    ]
+    "Documents": []
   }
 }

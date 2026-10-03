@@ -1,28 +1,27 @@
-# MiraQueue 🪞 Documentation
+# MiraQueue 🪞 V2.0.0 documentation
 
-This documentation explains MiraQueue V1.0.0 from user workflows down to script internals.
+## User guides
 
-## User Guides
-
-- [Quick Start](quick-start.md)
-- [Installation](installation.md)
-- [Configuration](configuration.md)
-- [Safety](safety.md)
+- [Quick start](quick-start.md)
+- [Installation and V1 upgrade](installation.md)
+- [Configuration and defaults](configuration.md)
+- [Safety boundaries](safety.md)
 - [Troubleshooting](troubleshooting.md)
-- [Release Notes](release-v1.0.0.md)
+- [V2 release notes](release-v2.0.0.md)
+- [Historical V1 release notes](release-v1.0.0.md)
 
 ## Maps
 
-- [Repository Map](maps/repository-map.md)
-- [Runtime Files Map](maps/runtime-files-map.md)
-- [Configuration Map](maps/configuration-map.md)
-- [Queue Lifecycle Map](maps/queue-lifecycle-map.md)
-- [Watcher Flow Map](maps/watcher-flow-map.md)
-- [Apply Pending Map](maps/apply-pending-map.md)
-- [Full Mirror Policy Map](maps/full-mirror-policy-map.md)
-- [Scheduled Task Map](maps/scheduled-task-map.md)
-- [Function Map](maps/function-map.md)
+- [Repository](maps/repository-map.md)
+- [Runtime files](maps/runtime-files-map.md)
+- [Configuration](maps/configuration-map.md)
+- [Queue lifecycle](maps/queue-lifecycle-map.md)
+- [Watcher flow](maps/watcher-flow-map.md)
+- [Apply Pending](maps/apply-pending-map.md)
+- [Full Mirror policies](maps/full-mirror-policy-map.md)
+- [Scheduled task lifecycle](maps/scheduled-task-map.md)
+- [Function map](maps/function-map.md)
 
-## Deep Explanation
+## Implementation
 
-Read [Overview](explanation/00-overview.md) first, then continue through the numbered files. The [Function Reference](explanation/15-function-reference.md) covers every PowerShell function in the script.
+Start with [the overview](explanation/00-overview.md), then follow the numbered explanations through [design decisions](explanation/14-design-decisions.md). The [function reference](explanation/15-function-reference.md) inventories every top-level function and its actual parameters/calls.
